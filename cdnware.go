@@ -146,6 +146,9 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude,
 
 	sourceRoot := filepath.Join(baseDir, r.srcDir)
 	err := filepath.WalkDir(sourceRoot, func(path string, entry fs.DirEntry, err error) error {
+		if path == sourceRoot && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}

@@ -354,6 +354,27 @@ func runCLI(t *testing.T, args ...string) (map[string]string, string, error) {
 	return manifest, string(output), nil
 }
 
+func TestCLIWithoutSourceAssets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "empty site"},
+		{name: "missing custom source", args: []string{"-src", "static"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifest, output, err := runCLI(t, append(tc.args, root)...)
+			if err != nil || len(manifest) != 0 {
+				t.Fatalf("manifest=%v err=%v output=%s", manifest, err, output)
+			}
+			if output != "{}\n" {
+				t.Fatalf("empty manifest output = %q", output)
+			}
+		})
+	}
+}
+
 func TestCLIUsesEmbeddedConfigAsFallback(t *testing.T) {
 	root := t.TempDir()
 	buildDir := filepath.Join(root, "build")

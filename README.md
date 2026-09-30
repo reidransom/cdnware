@@ -26,6 +26,10 @@ $ cdnware --cdn https://cdn.example.com/some-path _site
 
 Every file in `_site/assets` is copied to `_site/assets-rev` with an 8-character content hash. Nested directories are preserved. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output.
 
+If the site has no `assets` directory (or no configured `src` directory),
+cdnware prints an empty `{}` manifest. No destination directory is created
+when there are no assets to revise.
+
 Use `--rev-include '**/*.css' --rev-include '**/*.js'` to revise only matching
 source-relative paths, or `--rev-exclude '**/*.map'` to omit matching paths.
 When both are set, exclusion wins. Excluded files stay in `assets` and do not
