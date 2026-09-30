@@ -37,6 +37,7 @@ type Config struct {
 	RevExclude        *[]string `toml:"rev_exclude" yaml:"rev_exclude" json:"rev_exclude,omitempty"`
 	RewriteExtensions *[]string `toml:"rewrite_extensions" yaml:"rewrite_extensions" json:"rewrite_extensions,omitempty"`
 	ExternalHosts     *[]string `toml:"external_hosts" yaml:"external_hosts" json:"external_hosts,omitempty"`
+	GoogleFonts       *bool     `toml:"google_fonts" yaml:"google_fonts" json:"google_fonts,omitempty"`
 }
 
 type Settings struct {
@@ -48,6 +49,7 @@ type Settings struct {
 	RevExclude        []string
 	RewriteExtensions []string
 	ExternalHosts     []string
+	GoogleFonts       bool
 }
 
 type asset struct {
@@ -69,6 +71,8 @@ type revisioner struct {
 	rewriteExtensions map[string]bool
 	external          map[string]string
 	externalBases     map[string]*url.URL
+	googleStyles      bool
+	stripGoogleHints  bool
 }
 
 func hashReader(reader io.Reader) (string, error) {
@@ -321,6 +325,9 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 			return externalReplacement(raw, nil, r.external)
 		})
 	}
+	if rewritable && r.stripGoogleHints && strings.EqualFold(filepath.Ext(current.path), ".html") {
+		content = stripGooglePreconnect(content)
+	}
 	if rewritable {
 		for _, replacement := range r.dependencies(current, content) {
 			dependencyURL := replacement.url
@@ -336,6 +343,11 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 
 	hash := hashBytes(content)
 	destRel := revisionedName(current.rel, hash)
+	if r.googleStyles && filepath.Ext(current.rel) == ".bin" {
+		if base := r.externalBases[current.url]; base != nil && googleOrigin(base, "fonts.googleapis.com") {
+			destRel = revisionedName(current.rel+".css", hash)
+		}
+	}
 	destPath := filepath.Join(r.baseDir, r.destDir, destRel)
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return "", fmt.Errorf("creating destination directory: %w", err)
@@ -500,6 +512,7 @@ type flagSet struct {
 	rewriteExtensions patternFlags
 	externalHosts     string
 	configPath        string
+	googleFonts       bool
 }
 
 func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, explicit map[string]bool) (Settings, error) {
@@ -512,6 +525,7 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	revInclude, revExclude := defaults.RevInclude, defaults.RevExclude
 	rewriteExtensions := defaults.RewriteExtensions
 	externalHosts := defaults.ExternalHosts
+	googleFonts := defaults.GoogleFonts
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -533,6 +547,9 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		}
 		if fileCfg.ExternalHosts != nil {
 			externalHosts = fileCfg.ExternalHosts
+		}
+		if fileCfg.GoogleFonts != nil {
+			googleFonts = fileCfg.GoogleFonts
 		}
 	}
 	if explicit["cdn"] {
@@ -568,6 +585,12 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	if explicit["external-hosts"] {
 		entries := strings.Split(fs.externalHosts, ",")
 		externalHosts = &entries
+	}
+	if explicit["google-fonts"] {
+		googleFonts = &fs.googleFonts
+	}
+	if googleFonts != nil {
+		settings.GoogleFonts = *googleFonts
 	}
 	if revInclude != nil {
 		var err error
@@ -670,6 +693,7 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.Var(&fs.revExclude, "rev-exclude", "glob of source-relative paths not to revise (repeatable); empty excludes nothing")
 	fs.fs.Var(&fs.rewriteExtensions, "rewrite-ext", "asset extension whose references are rewritten before hashing (repeatable, e.g. .css); empty disables asset rewriting")
 	fs.fs.StringVar(&fs.externalHosts, "external-hosts", "", "comma-separated HTTPS hostnames allowed for external asset downloads (empty disables)")
+	fs.fs.BoolVar(&fs.googleFonts, "google-fonts", false, "self-host Google Fonts stylesheets and font binaries")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())

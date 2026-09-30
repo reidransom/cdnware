@@ -6,6 +6,9 @@ dest = "assets-rev"
 # Only explicitly listed HTTPS hostnames are fetched. Empty disables downloads.
 external_hosts = []
 
+# Self-host Google Fonts stylesheets and their font files independently of external_hosts.
+google_fonts = false
+
 # File extensions of source assets whose references are rewritten before hashing.
 # Other assets are still revisioned. Set [] to disable asset-to-asset rewriting.
 rewrite_extensions = [".css", ".html", ".js", ".json", ".mjs", ".svg", ".toml", ".webmanifest", ".xml"]

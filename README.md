@@ -106,6 +106,7 @@ flag forms work (including `--name=value`); put flags before SITEROOT. Precedenc
 | `--rev-exclude` | _no exclusions_ | Repeatable source-relative glob excluded from revisioning, e.g. `--rev-exclude '**/*.map'`; `--rev-exclude ''` clears configured exclusions |
 | `--rewrite-ext` | `.css`, `.html`, `.js`, `.json`, `.mjs`, `.svg`, `.toml`, `.webmanifest`, `.xml` | Repeatable asset extension whose references are rewritten before hashing; `--rewrite-ext ''` disables asset-to-asset rewriting |
 | `--external-hosts` | `""` (disabled) | Comma-separated exact HTTPS hostnames eligible for local asset downloads; `--external-hosts ''` clears a configured list |
+| `--google-fonts` | `false` | Self-host Google Fonts stylesheets and their fonts; `--google-fonts=false` overrides a config file |
 | `--config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
@@ -126,10 +127,11 @@ It leaves `rev_exclude` unset because the default is to exclude nothing.
 cdn = "https://cdn.example.com/v3"
 src = "assets"
 dest = "assets-rev"
-rev_include = ["**/*.css", "**/*.js", "images/logo-*.svg"]
+rev_include = ["**/*.css", "**/*.js", "images/logo-*.svg", "lib/.cdnware/**"]
 rev_exclude = ["**/*.map"]
 rewrite_extensions = [".css", ".js", ".txt"]
 external_hosts = ["cdn.jsdelivr.net"]
+google_fonts = true
 ```
 
 ```yaml
@@ -137,10 +139,11 @@ external_hosts = ["cdn.jsdelivr.net"]
 cdn: https://cdn.example.com/v3
 src: assets
 dest: assets-rev
-rev_include: ["**/*.css", "**/*.js", "images/logo-*.svg"]
+rev_include: ["**/*.css", "**/*.js", "images/logo-*.svg", "lib/.cdnware/**"]
 rev_exclude: ["**/*.map"]
 rewrite_extensions: [".css", ".js", ".txt"]
 external_hosts: [cdn.jsdelivr.net]
+google_fonts: true
 ```
 
 ```json
@@ -148,10 +151,11 @@ external_hosts: [cdn.jsdelivr.net]
   "cdn": "https://cdn.example.com/v3",
   "src": "assets",
   "dest": "assets-rev",
-  "rev_include": ["**/*.css", "**/*.js", "images/logo-*.svg"],
+  "rev_include": ["**/*.css", "**/*.js", "images/logo-*.svg", "lib/.cdnware/**"],
   "rev_exclude": ["**/*.map"],
   "rewrite_extensions": [".css", ".js", ".txt"],
-  "external_hosts": ["cdn.jsdelivr.net"]
+  "external_hosts": ["cdn.jsdelivr.net"],
+  "google_fonts": true
 }
 ```
 
@@ -214,6 +218,43 @@ The existing `rev_include`, `rev_exclude`, and `rewrite_extensions` settings sti
 apply: excluding a downloaded file leaves its final reference at its local
 source URL, and disabling CSS rewriting prevents dependency URLs inside
 revisioned stylesheets from being localized.
+
+### Self-hosting Google Fonts
+
+Opt in with `--google-fonts` or `google_fonts = true` in TOML (also supported
+as a boolean in YAML/JSON). This is independent of `external_hosts`: no
+general-host allowlist entry is needed, and enabling it permits only HTTPS
+stylesheets from `fonts.googleapis.com` and the `fonts.gstatic.com` font files
+referenced by those stylesheets. Redirects must remain on the appropriate
+origin. It does not download inline CSS, navigation links, HTTP links, or
+unrelated external resources.
+
+Generated HTML stylesheet links and `@import` in generated and local CSS
+qualify, including CSS2 family/variant query strings. The stylesheet and every
+referenced font are saved in `assets/lib/.cdnware/` (or `<src>/lib/.cdnware/`),
+revisioned under `<dest>/lib/.cdnware/`, and mapped from their original HTTPS
+URLs to their final same-origin or `--cdn` URLs in the JSON manifest. Font-face
+rules and unicode ranges come from Google's CSS response; only URL references
+are changed. Google Fonts responses may vary with the request's user agent:
+the emitted CSS contains exactly the variants provided at build time, not
+synthetic fallbacks for other clients. Check browser compatibility against the
+build environment before deploying.
+
+Google Fonts-only preconnect hints are removed from localized HTML unless the
+page still contains a Google Fonts origin reference or custom asset selection
+and CSS rewriting leave font loads unlocalized. Source CSS/HTML is not modified;
+only its revisioned copy is rewritten. The normal `rev_include`, `rev_exclude`,
+and `rewrite_extensions` settings still apply: an excluded download stays at
+its local source URL, while disabling `.css` rewriting leaves its dependency
+URLs unchanged and may prevent complete localization. With
+default settings a rerun retains still-referenced managed files and removes
+stale ones after site regeneration; unrelated library files are untouched.
+Each response is limited to 16 MiB, each request to 15 seconds, and at most
+128 managed external files are downloaded per run (shared with
+`external_hosts`). Fetch failures stop the run before generated page links
+are changed. Review the license for each font family you redistribute and
+include any required license or attribution notice with your deployment;
+downloaded CSS and binaries alone are not a license review.
 
 ## Philosophy
 

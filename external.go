@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,13 +37,15 @@ type managedAsset struct {
 }
 
 type externalAssets struct {
-	settings Settings
-	client   *http.Client
-	hosts    map[string]bool
-	previous map[string]managedAsset
-	active   map[string]managedAsset
-	payload  map[string][]byte
-	files    map[string][]byte // Generated HTML/CSS, read once before any writes.
+	settings     Settings
+	client       *http.Client
+	hosts        map[string]bool
+	previous     map[string]managedAsset
+	active       map[string]managedAsset
+	payload      map[string][]byte
+	files        map[string][]byte // Generated HTML/CSS, read once before any writes.
+	googleStyles bool
+	stripHints   bool
 }
 
 func parseExternalHosts(entries []string) ([]string, error) {
@@ -76,8 +80,45 @@ func (e *externalAssets) allowed(u *url.URL) bool {
 	return u.Scheme == "https" && u.User == nil && e.hosts[strings.ToLower(u.Hostname())] && u.Hostname() != ""
 }
 
+type downloadRole string
+
+const (
+	googleStylesheet downloadRole = "google stylesheet"
+	googleFont       downloadRole = "google font"
+)
+
+type roleContextKey struct{}
+
+func googleOrigin(u *url.URL, host string) bool {
+	return u.Scheme == "https" && u.User == nil && strings.EqualFold(u.Hostname(), host) && (u.Port() == "" || u.Port() == "443")
+}
+
+func (e *externalAssets) role(u, base *url.URL, css bool) downloadRole {
+	if !e.settings.GoogleFonts {
+		return ""
+	}
+	if css && googleOrigin(u, "fonts.googleapis.com") {
+		return googleStylesheet
+	}
+	if !css && base != nil && googleOrigin(base, "fonts.googleapis.com") && googleOrigin(u, "fonts.gstatic.com") {
+		return googleFont
+	}
+	return ""
+}
+
+func (e *externalAssets) permitted(u *url.URL, role downloadRole) bool {
+	switch role {
+	case googleStylesheet:
+		return googleOrigin(u, "fonts.googleapis.com")
+	case googleFont:
+		return googleOrigin(u, "fonts.gstatic.com")
+	default:
+		return e.allowed(u)
+	}
+}
+
 // externalURL returns the fetch identity; HTTP resources ignore fragments.
-func (e *externalAssets) externalURL(raw string, base *url.URL) string {
+func (e *externalAssets) externalURL(raw string, base *url.URL, css bool) string {
 	if base != nil && (raw == "" || strings.HasPrefix(raw, "#")) {
 		return ""
 	}
@@ -88,7 +129,7 @@ func (e *externalAssets) externalURL(raw string, base *url.URL) string {
 	if base != nil {
 		u = base.ResolveReference(u)
 	}
-	if !e.allowed(u) {
+	if !e.permitted(u, e.role(u, base, css)) {
 		return ""
 	}
 	u.Fragment, u.RawFragment = "", ""
@@ -112,8 +153,27 @@ func managedName(raw string) string {
 	return hex.EncodeToString(sum[:]) + ext
 }
 
+func googleManagedName(raw string) string {
+	name := managedName(raw)
+	u, err := url.Parse(raw)
+	if err == nil && strings.EqualFold(u.Hostname(), "fonts.googleapis.com") && (u.Path == "/css" || u.Path == "/css2") {
+		return strings.TrimSuffix(name, filepath.Ext(name)) + ".css"
+	}
+	return name
+}
+
+func (e *externalAssets) sourceFor(name string) string {
+	return "/" + filepath.ToSlash(filepath.Join(e.settings.Src, "lib", ".cdnware", name))
+}
+
 func (e *externalAssets) source(raw string) string {
-	return "/" + filepath.ToSlash(filepath.Join(e.settings.Src, "lib", ".cdnware", managedName(raw)))
+	if old, exists := e.previous[raw]; exists {
+		return old.Source
+	}
+	if e.settings.GoogleFonts {
+		return e.sourceFor(googleManagedName(raw))
+	}
+	return e.sourceFor(managedName(raw))
 }
 
 func (e *externalAssets) managedDir() string {
@@ -308,6 +368,56 @@ func transformHTML(content []byte, replace func(string, bool) string) []byte {
 	return append(out, content[offset:]...)
 }
 
+// stripGooglePreconnect keeps the hint if anything on the page still refers
+// to a Google Fonts origin outside the hint itself.
+func stripGooglePreconnect(content []byte) []byte {
+	z := html.NewTokenizer(bytes.NewReader(content))
+	var out []byte
+	offset := 0
+	for {
+		typ := z.Next()
+		if typ == html.ErrorToken {
+			break
+		}
+		raw := z.Raw()
+		remove := false
+		if typ == html.StartTagToken || typ == html.SelfClosingTagToken {
+			token := z.Token()
+			if strings.EqualFold(token.Data, "link") {
+				preconnect, google := false, false
+				for _, attr := range token.Attr {
+					switch attr.Key {
+					case "rel":
+						roles := strings.Fields(strings.ToLower(attr.Val))
+						preconnect = len(roles) == 1 && roles[0] == "preconnect"
+					case "href":
+						u, err := url.Parse(attr.Val)
+						google = err == nil && (googleOrigin(u, "fonts.googleapis.com") || googleOrigin(u, "fonts.gstatic.com"))
+					}
+				}
+				remove = preconnect && google
+			}
+		}
+		if remove {
+			if out == nil {
+				out = make([]byte, 0, len(content))
+				out = append(out, content[:offset]...)
+			}
+		} else if out != nil {
+			out = append(out, raw...)
+		}
+		offset += len(raw)
+	}
+	if out == nil {
+		return content
+	}
+	out = append(out, content[offset:]...)
+	if bytes.Contains(out, []byte("fonts.googleapis.com")) || bytes.Contains(out, []byte("fonts.gstatic.com")) {
+		return content
+	}
+	return out
+}
+
 func externalReplacement(raw string, base *url.URL, mapping map[string]string) string {
 	if base != nil && (raw == "" || strings.HasPrefix(raw, "#")) {
 		return raw
@@ -330,7 +440,7 @@ func externalReplacement(raw string, base *url.URL, mapping map[string]string) s
 	return raw
 }
 
-func (e *externalAssets) fetch(raw string, css bool) error {
+func (e *externalAssets) fetch(raw string, css bool, role downloadRole) error {
 	if old, ok := e.active[raw]; ok {
 		if !css || old.Dependencies != nil {
 			return nil
@@ -343,10 +453,14 @@ func (e *externalAssets) fetch(raw string, css bool) error {
 		return fmt.Errorf("external asset limit of %d exceeded at %s", maxExternalFiles, raw)
 	}
 	u, err := url.Parse(raw)
-	if err != nil || !e.allowed(u) {
+	if err != nil || !e.permitted(u, role) {
 		return fmt.Errorf("external URL not allowed: %s", raw)
 	}
-	response, err := e.client.Get(raw)
+	request, err := http.NewRequestWithContext(context.WithValue(context.Background(), roleContextKey{}, role), http.MethodGet, raw, nil)
+	if err != nil {
+		return fmt.Errorf("fetching %s: %w", raw, err)
+	}
+	response, err := e.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("fetching %s: %w", raw, err)
 	}
@@ -354,12 +468,21 @@ func (e *externalAssets) fetch(raw string, css bool) error {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("fetching %s: HTTP %s", raw, response.Status)
 	}
+	if role == googleStylesheet {
+		mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+		if err != nil || mediaType != "text/css" {
+			return fmt.Errorf("fetching %s: expected text/css stylesheet", raw)
+		}
+	}
 	content, err := io.ReadAll(io.LimitReader(response.Body, maxExternalBytes+1))
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", raw, err)
 	}
 	if len(content) > maxExternalBytes {
 		return fmt.Errorf("fetching %s: response exceeds %d bytes", raw, maxExternalBytes)
+	}
+	if role == googleFont && (len(content) == 0 || strings.HasPrefix(response.Header.Get("Content-Type"), "text/html")) {
+		return fmt.Errorf("fetching %s: invalid font response", raw)
 	}
 	e.payload[raw] = content
 	e.active[raw] = managedAsset{Source: e.source(raw), Digest: digest(content), Base: response.Request.URL.String()}
@@ -375,8 +498,23 @@ func (e *externalAssets) fetchCSS(raw string, base *url.URL, content []byte) err
 	e.active[raw] = entry // Mark before descending so CSS import cycles terminate here.
 	var order []string
 	imports := make(map[string]bool)
+	google := e.settings.GoogleFonts && googleOrigin(base, "fonts.googleapis.com")
+	fonts := 0
+	var invalid string
 	rewriteCSS(content, func(value string, imported bool) string {
-		resolved := e.externalURL(value, base)
+		resolved := e.externalURL(value, base, imported)
+		if google {
+			expected := googleFont
+			if imported {
+				expected = googleStylesheet
+			}
+			u, err := url.Parse(strings.TrimSpace(value))
+			if err != nil || resolved == "" || e.role(base.ResolveReference(u), base, imported) != expected {
+				invalid = value
+			} else if !imported {
+				fonts++
+			}
+		}
 		if resolved != "" {
 			if _, seen := imports[resolved]; !seen {
 				order = append(order, resolved)
@@ -385,10 +523,14 @@ func (e *externalAssets) fetchCSS(raw string, base *url.URL, content []byte) err
 		}
 		return value
 	})
+	if google && (invalid != "" || fonts == 0 || !bytes.Contains(bytes.ToLower(content), []byte("@font-face"))) {
+		return fmt.Errorf("fetching %s: invalid Google Fonts stylesheet (font URL %q)", raw, invalid)
+	}
 	entry.Dependencies = order
 	e.active[raw] = entry
 	for _, dependency := range order {
-		if err := e.fetch(dependency, imports[dependency]); err != nil {
+		depURL, _ := url.Parse(dependency)
+		if err := e.fetch(dependency, imports[dependency], e.role(depURL, base, imports[dependency])); err != nil {
 			return err
 		}
 	}
@@ -422,8 +564,9 @@ func (e *externalAssets) scan() error {
 			if fetchErr != nil {
 				return value
 			}
-			if raw := e.externalURL(value, nil); raw != "" {
-				fetchErr = e.fetch(raw, css)
+			if raw := e.externalURL(value, nil, css); raw != "" {
+				u, _ := url.Parse(raw)
+				fetchErr = e.fetch(raw, css, e.role(u, nil, css))
 			}
 			return value
 		}
@@ -459,7 +602,7 @@ func (e *externalAssets) readState() error {
 		return fmt.Errorf("parsing external asset state: %w", err)
 	}
 	for raw, entry := range e.previous {
-		if entry.Source != e.source(raw) {
+		if entry.Source != e.sourceFor(managedName(raw)) && entry.Source != e.sourceFor(googleManagedName(raw)) {
 			return fmt.Errorf("invalid external asset state for %s", raw)
 		}
 	}
@@ -512,7 +655,7 @@ func (e *externalAssets) stage() error {
 		if _, downloaded := e.payload[raw]; downloaded {
 			continue
 		}
-		path := filepath.Join(dir, managedName(raw))
+		path := filepath.Join(dir, filepath.Base(entry.Source))
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			return fmt.Errorf("previously downloaded asset is missing or unsafe: %s", path)
@@ -523,7 +666,7 @@ func (e *externalAssets) stage() error {
 		}
 	}
 	for raw := range e.payload {
-		path := filepath.Join(dir, managedName(raw))
+		path := filepath.Join(dir, filepath.Base(e.source(raw)))
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -544,7 +687,7 @@ func (e *externalAssets) stage() error {
 		if _, keep := e.active[raw]; keep {
 			continue
 		}
-		path := filepath.Join(dir, managedName(raw))
+		path := filepath.Join(dir, filepath.Base(entry.Source))
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() {
 			continue
@@ -557,7 +700,7 @@ func (e *externalAssets) stage() error {
 		}
 	}
 	for raw, content := range e.payload {
-		path := filepath.Join(dir, managedName(raw))
+		path := filepath.Join(dir, filepath.Base(e.source(raw)))
 		if err := os.WriteFile(path, content, 0644); err != nil {
 			return err
 		}
@@ -565,16 +708,63 @@ func (e *externalAssets) stage() error {
 	return nil
 }
 
+func (e *externalAssets) canStripGoogleHints(r *revisioner) bool {
+	if !e.googleStyles || !r.rewriteExtensions[".css"] {
+		return false
+	}
+	for raw, entry := range e.active {
+		u, err := url.Parse(raw)
+		if err == nil && googleOrigin(u, "fonts.googleapis.com") && entry.Dependencies != nil {
+			if _, selected := r.assets[entry.Source]; !selected {
+				return false
+			}
+		}
+	}
+	sourceRoot := filepath.Join(e.settings.BaseDir, e.settings.Src)
+	for path, content := range e.files {
+		if !strings.EqualFold(filepath.Ext(path), ".css") || !bytes.Contains(content, []byte("fonts.googleapis.com")) {
+			continue
+		}
+		rel, err := filepath.Rel(sourceRoot, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		sourceURL := "/" + filepath.ToSlash(filepath.Join(e.settings.Src, rel))
+		if _, selected := r.assets[sourceURL]; !selected {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *externalAssets) finish(manifest map[string]string) error {
+	var previousFinals map[string]string
 	for raw, entry := range e.active {
 		if final, ok := manifest[entry.Source]; ok {
 			entry.Final = final
 		} else {
 			entry.Final = entry.Source // Normal rev_include/rev_exclude selection.
 		}
+		if old, ok := e.previous[raw]; e.googleStyles && ok && strings.HasSuffix(old.Final, ".bin") && strings.HasSuffix(entry.Final, ".css") {
+			if previousFinals == nil {
+				previousFinals = make(map[string]string)
+			}
+			previousFinals[old.Final] = entry.Final
+		}
 		e.active[raw] = entry
 		manifest[raw] = entry.Final
 	}
+	replacements := manifest
+	if len(previousFinals) != 0 {
+		replacements = make(map[string]string, len(manifest)+len(previousFinals))
+		for old, final := range manifest {
+			replacements[old] = final
+		}
+		for old, final := range previousFinals {
+			replacements[old] = final
+		}
+	}
+	googleActive := e.stripHints
 	for path := range e.files {
 		if strings.HasPrefix(filepath.Clean(path), filepath.Clean(filepath.Join(e.settings.BaseDir, e.settings.Src))+string(filepath.Separator)) {
 			continue
@@ -585,9 +775,12 @@ func (e *externalAssets) finish(manifest map[string]string) error {
 		}
 		var updated []byte
 		if strings.EqualFold(filepath.Ext(path), ".css") {
-			updated = rewriteCSS(content, func(value string, _ bool) string { return externalReplacement(value, nil, manifest) })
+			updated = rewriteCSS(content, func(value string, _ bool) string { return externalReplacement(value, nil, replacements) })
 		} else {
-			updated = transformHTML(content, func(value string, _ bool) string { return externalReplacement(value, nil, manifest) })
+			updated = transformHTML(content, func(value string, _ bool) string { return externalReplacement(value, nil, replacements) })
+			if googleActive {
+				updated = stripGooglePreconnect(updated)
+			}
 		}
 		if !bytes.Equal(content, updated) {
 			info, err := os.Stat(path)
@@ -608,26 +801,22 @@ func (e *externalAssets) finish(manifest map[string]string) error {
 
 func run(settings Settings, client *http.Client) (map[string]string, error) {
 	var external *externalAssets
-	if len(settings.ExternalHosts) != 0 {
+	if len(settings.ExternalHosts) != 0 || settings.GoogleFonts {
 		copyClient := *client
 		if copyClient.Timeout == 0 || copyClient.Timeout > externalTimeout {
 			copyClient.Timeout = externalTimeout
-		}
-		copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 || req.URL.Scheme != "https" {
-				return fmt.Errorf("external redirect to %s is not allowed", req.URL)
-			}
-			for _, host := range settings.ExternalHosts {
-				if strings.EqualFold(req.URL.Hostname(), host) && req.URL.User == nil {
-					return nil
-				}
-			}
-			return fmt.Errorf("external redirect to %s is not allowed", req.URL)
 		}
 		external = &externalAssets{
 			settings: settings, client: &copyClient,
 			hosts: make(map[string]bool), previous: make(map[string]managedAsset),
 			active: make(map[string]managedAsset), payload: make(map[string][]byte), files: make(map[string][]byte),
+		}
+		copyClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			role, _ := req.Context().Value(roleContextKey{}).(downloadRole)
+			if len(via) >= 10 || !external.permitted(req.URL, role) {
+				return fmt.Errorf("external redirect to %s is not allowed", req.URL)
+			}
+			return nil
 		}
 		for _, host := range settings.ExternalHosts {
 			external.hosts[host] = true
@@ -639,6 +828,15 @@ func run(settings Settings, client *http.Client) (map[string]string, error) {
 			return nil, err
 		}
 		external.retainReferenced()
+		if settings.GoogleFonts {
+			for raw, entry := range external.active {
+				u, err := url.Parse(raw)
+				if err == nil && googleOrigin(u, "fonts.googleapis.com") && entry.Dependencies != nil {
+					external.googleStyles = true
+					break
+				}
+			}
+		}
 		if err := external.stage(); err != nil {
 			return nil, err
 		}
@@ -648,6 +846,9 @@ func run(settings Settings, client *http.Client) (map[string]string, error) {
 		return nil, err
 	}
 	if external != nil {
+		r.googleStyles = external.googleStyles
+		external.stripHints = external.canStripGoogleHints(r)
+		r.stripGoogleHints = external.stripHints
 		r.external = make(map[string]string, len(external.active))
 		for raw, entry := range external.active {
 			r.external[raw] = entry.Source
