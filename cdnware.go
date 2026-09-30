@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +36,7 @@ type Config struct {
 	RevInclude        *[]string `toml:"rev_include" yaml:"rev_include" json:"rev_include,omitempty"`
 	RevExclude        *[]string `toml:"rev_exclude" yaml:"rev_exclude" json:"rev_exclude,omitempty"`
 	RewriteExtensions *[]string `toml:"rewrite_extensions" yaml:"rewrite_extensions" json:"rewrite_extensions,omitempty"`
+	ExternalHosts     *[]string `toml:"external_hosts" yaml:"external_hosts" json:"external_hosts,omitempty"`
 }
 
 type Settings struct {
@@ -44,6 +47,7 @@ type Settings struct {
 	RevInclude        []string
 	RevExclude        []string
 	RewriteExtensions []string
+	ExternalHosts     []string
 }
 
 type asset struct {
@@ -63,6 +67,8 @@ type revisioner struct {
 	state             map[string]uint8
 	result            map[string]string
 	rewriteExtensions map[string]bool
+	external          map[string]string
+	externalBases     map[string]*url.URL
 }
 
 func hashReader(reader io.Reader) (string, error) {
@@ -146,6 +152,9 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude,
 		rel, err := filepath.Rel(sourceRoot, path)
 		if err != nil {
 			return err
+		}
+		if filepath.ToSlash(rel) == "lib/.cdnware/state.json" {
+			return nil
 		}
 		url := "/" + filepath.ToSlash(filepath.Join(r.srcDir, rel))
 		if revInclude != nil || len(revExclude) != 0 {
@@ -300,7 +309,19 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", current.path, err)
 	}
-	if r.isRewritableAsset(current.path) {
+	rewritable := r.isRewritableAsset(current.path) || r.externalBases[current.url] != nil && r.rewriteExtensions[".css"]
+	if rewritable && (strings.EqualFold(filepath.Ext(current.path), ".css") || r.externalBases[current.url] != nil) && len(r.external) != 0 {
+		base := r.externalBases[current.url]
+		content = rewriteCSS(content, func(raw string, _ bool) string {
+			return externalReplacement(raw, base, r.external)
+		})
+	}
+	if rewritable && strings.EqualFold(filepath.Ext(current.path), ".html") && len(r.external) != 0 {
+		content = transformHTML(content, func(raw string, _ bool) string {
+			return externalReplacement(raw, nil, r.external)
+		})
+	}
+	if rewritable {
 		for _, replacement := range r.dependencies(current, content) {
 			dependencyURL := replacement.url
 			if _, selected := r.assets[replacement.url]; selected {
@@ -477,6 +498,7 @@ type flagSet struct {
 	revInclude        patternFlags
 	revExclude        patternFlags
 	rewriteExtensions patternFlags
+	externalHosts     string
 	configPath        string
 }
 
@@ -489,6 +511,7 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	}
 	revInclude, revExclude := defaults.RevInclude, defaults.RevExclude
 	rewriteExtensions := defaults.RewriteExtensions
+	externalHosts := defaults.ExternalHosts
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -507,6 +530,9 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		}
 		if fileCfg.RewriteExtensions != nil {
 			rewriteExtensions = fileCfg.RewriteExtensions
+		}
+		if fileCfg.ExternalHosts != nil {
+			externalHosts = fileCfg.ExternalHosts
 		}
 	}
 	if explicit["cdn"] {
@@ -539,6 +565,10 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		}
 		rewriteExtensions = &entries
 	}
+	if explicit["external-hosts"] {
+		entries := strings.Split(fs.externalHosts, ",")
+		externalHosts = &entries
+	}
 	if revInclude != nil {
 		var err error
 		settings.RevInclude, err = parseRevPatterns(*revInclude, "rev_include")
@@ -558,6 +588,13 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		return Settings{}, err
 	}
 	settings.RewriteExtensions = extensions
+	if externalHosts != nil {
+		var err error
+		settings.ExternalHosts, err = parseExternalHosts(*externalHosts)
+		if err != nil {
+			return Settings{}, err
+		}
+	}
 	return settings, nil
 }
 
@@ -632,6 +669,7 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.Var(&fs.revInclude, "rev-include", "glob of source-relative paths to revise (repeatable, e.g. **/*.css); empty revises nothing")
 	fs.fs.Var(&fs.revExclude, "rev-exclude", "glob of source-relative paths not to revise (repeatable); empty excludes nothing")
 	fs.fs.Var(&fs.rewriteExtensions, "rewrite-ext", "asset extension whose references are rewritten before hashing (repeatable, e.g. .css); empty disables asset rewriting")
+	fs.fs.StringVar(&fs.externalHosts, "external-hosts", "", "comma-separated HTTPS hostnames allowed for external asset downloads (empty disables)")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())
@@ -670,11 +708,8 @@ func loadSettings(args []string) (Settings, error) {
 func main() {
 	settings, err := loadSettings(os.Args[1:])
 	check(err)
-	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude, settings.RevExclude, settings.RewriteExtensions)
+	manifest, err := run(settings, http.DefaultClient)
 	check(err)
-	manifest, err := revisioner.revise()
-	check(err)
-	check(useman(manifest, settings.BaseDir, settings.Src, settings.Dest))
 	jsonData, err := json.MarshalIndent(manifest, "", "  ")
 	check(err)
 	fmt.Printf("%s\n", jsonData)

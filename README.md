@@ -105,6 +105,7 @@ flag forms work (including `--name=value`); put flags before SITEROOT. Precedenc
 | `--rev-include` | _all files_ | Repeatable source-relative glob, e.g. `--rev-include '**/*.css'`; `--rev-include ''` revises none |
 | `--rev-exclude` | _no exclusions_ | Repeatable source-relative glob excluded from revisioning, e.g. `--rev-exclude '**/*.map'`; `--rev-exclude ''` clears configured exclusions |
 | `--rewrite-ext` | `.css`, `.html`, `.js`, `.json`, `.mjs`, `.svg`, `.toml`, `.webmanifest`, `.xml` | Repeatable asset extension whose references are rewritten before hashing; `--rewrite-ext ''` disables asset-to-asset rewriting |
+| `--external-hosts` | `""` (disabled) | Comma-separated exact HTTPS hostnames eligible for local asset downloads; `--external-hosts ''` clears a configured list |
 | `--config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
@@ -128,6 +129,7 @@ dest = "assets-rev"
 rev_include = ["**/*.css", "**/*.js", "images/logo-*.svg"]
 rev_exclude = ["**/*.map"]
 rewrite_extensions = [".css", ".js", ".txt"]
+external_hosts = ["cdn.jsdelivr.net"]
 ```
 
 ```yaml
@@ -138,6 +140,7 @@ dest: assets-rev
 rev_include: ["**/*.css", "**/*.js", "images/logo-*.svg"]
 rev_exclude: ["**/*.map"]
 rewrite_extensions: [".css", ".js", ".txt"]
+external_hosts: [cdn.jsdelivr.net]
 ```
 
 ```json
@@ -147,7 +150,8 @@ rewrite_extensions: [".css", ".js", ".txt"]
   "dest": "assets-rev",
   "rev_include": ["**/*.css", "**/*.js", "images/logo-*.svg"],
   "rev_exclude": ["**/*.map"],
-  "rewrite_extensions": [".css", ".js", ".txt"]
+  "rewrite_extensions": [".css", ".js", ".txt"],
+  "external_hosts": ["cdn.jsdelivr.net"]
 }
 ```
 
@@ -176,6 +180,40 @@ separators and case-insensitive matching. `*` matches within one path segment,
 and `?`, character classes, and `{one,two}` alternatives are supported. Quote
 glob flags to prevent shell expansion. Absolute paths, `.` or `..` segments,
 malformed patterns, and duplicates (ignoring case) are errors within each list.
+
+### Self-hosting external assets
+
+Opt in with `--external-hosts cdn.jsdelivr.net` or set
+`external_hosts = ["cdn.jsdelivr.net"]` in a site config. For example:
+
+```
+cdnware --cdn https://cdn.example.com --external-hosts cdn.jsdelivr.net _site
+```
+
+If `_site/index.html` has a `<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js">`,
+cdnware downloads it before revisioning, then rewrites `src` to its content-hashed
+URL under `https://cdn.example.com/assets-rev/lib/.cdnware/`. The JSON manifest
+includes `https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js` mapped
+to that final URL, as well as the local `/assets/lib/.cdnware/...` source key.
+The managed source files and their bookkeeping live under `assets/lib/.cdnware/`;
+leave that directory intact between runs. Re-running against an already rewritten
+site retains referenced managed files; regenerating the site prunes unused ones.
+Unrelated files elsewhere in `assets/lib/` are untouched.
+
+Only HTTPS resources on exact listed hostnames qualify. The HTML scanner covers
+`script src`, stylesheet `link href`, image `src`/`srcset`; the CSS scanner covers
+`url(...)` and `@import` in CSS files, including recursively downloaded stylesheets.
+Remote stylesheet-relative dependencies resolve against the stylesheet's URL.
+Navigation links, inline CSS, JavaScript imports, and resources on other hosts
+remain external. Redirects must also stay on allowed HTTPS hosts. Each response
+is limited to 16 MiB and each request to 15 seconds; at most 128 external files
+are downloaded per run. Eligible fetch failures fail the command before page
+references are changed. Query-distinct URLs get distinct managed files.
+
+The existing `rev_include`, `rev_exclude`, and `rewrite_extensions` settings still
+apply: excluding a downloaded file leaves its final reference at its local
+source URL, and disabling CSS rewriting prevents dependency URLs inside
+revisioned stylesheets from being localized.
 
 ## Philosophy
 

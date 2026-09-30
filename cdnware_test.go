@@ -357,7 +357,7 @@ func runCLI(t *testing.T, args ...string) (map[string]string, string, error) {
 func TestCLIUsesEmbeddedConfigAsFallback(t *testing.T) {
 	root := t.TempDir()
 	buildDir := filepath.Join(root, "build")
-	for _, name := range []string{"cdnware.go", "go.mod", "go.sum"} {
+	for _, name := range []string{"cdnware.go", "external.go", "go.mod", "go.sum"} {
 		content, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
