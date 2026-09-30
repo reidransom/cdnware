@@ -574,7 +574,7 @@ func parseRevPatterns(entries []string, option string) ([]string, error) {
 }
 
 func getUsage() string {
-	return "Usage of cdnware:\n\n$ cdnware [OPTIONS] [SITEROOT]\n"
+	return "Usage of cdnware:\n\n$ cdnware [OPTIONS] [SITEROOT]\n\nOptions accept -name or --name (for example, --src assets).\n"
 }
 
 func loadSettings(args []string) (Settings, error) {

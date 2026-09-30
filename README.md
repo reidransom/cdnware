@@ -21,13 +21,13 @@ sudo mv cdnware /usr/local/bin # optional
 Suppose you built your jekyll site to the standard `_site` folder.
 
 ```
-$ cdnware -cdn https://cdn.example.com/some-path _site
+$ cdnware --cdn https://cdn.example.com/some-path _site
 ```
 
 Every file in `_site/assets` is copied to `_site/assets-rev` with an 8-character content hash. Nested directories are preserved. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output.
 
-Use `-rev-include '**/*.css' -rev-include '**/*.js'` to revise only matching
-source-relative paths, or `-rev-exclude '**/*.map'` to omit matching paths.
+Use `--rev-include '**/*.css' --rev-include '**/*.js'` to revise only matching
+source-relative paths, or `--rev-exclude '**/*.map'` to omit matching paths.
 When both are set, exclusion wins. Excluded files stay in `assets` and do not
 appear in `assets-rev` or the manifest. Site references to them remain
 unchanged; relative references from revisioned assets to excluded files become
@@ -85,23 +85,24 @@ $ cat _site/index.html
 
 ## Configuration
 
-All settings can be set via CLI flag or a config file. Precedence is
+All settings can be set via CLI flag or a config file. Both `--name` and `-name`
+flag forms work (including `--name=value`); put flags before SITEROOT. Precedence is
 **flag > config file > embedded base config**.
 
 ### Flags
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `-cdn` | `""` | CDN base URL |
-| `-src` | `assets` | Source asset directory (relative to SITEROOT) |
-| `-dest` | `assets-rev` | Destination directory for revisioned assets |
-| `-rev-include` | _all files_ | Repeatable source-relative glob, e.g. `-rev-include '**/*.css'`; `-rev-include ''` revises none |
-| `-rev-exclude` | _no exclusions_ | Repeatable source-relative glob excluded from revisioning, e.g. `-rev-exclude '**/*.map'`; `-rev-exclude ''` clears configured exclusions |
-| `-config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
+| `--cdn` | `""` | CDN base URL |
+| `--src` | `assets` | Source asset directory (relative to SITEROOT) |
+| `--dest` | `assets-rev` | Destination directory for revisioned assets |
+| `--rev-include` | _all files_ | Repeatable source-relative glob, e.g. `--rev-include '**/*.css'`; `--rev-include ''` revises none |
+| `--rev-exclude` | _no exclusions_ | Repeatable source-relative glob excluded from revisioning, e.g. `--rev-exclude '**/*.map'`; `--rev-exclude ''` clears configured exclusions |
+| `--config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
 
-If `-config` is not given, cdnware looks in SITEROOT then CWD for, in order:
+If `--config` is not given, cdnware looks in SITEROOT then CWD for, in order:
 `cdnware.toml`, `cdnware.yaml`, `cdnware.yml`, `cdnware.json`. First match wins.
 
 [`cdnware.example.toml`](cdnware.example.toml) is embedded in the binary at
@@ -144,9 +145,9 @@ With the shipped base config, omitting `rev_include` revises every regular
 source file, including files without an extension. An explicit empty list
 (`rev_include = []` in TOML, `rev_include: []` in YAML, or
 `"rev_include": []` in JSON) revises nothing: the manifest is `{}` and no
-destination assets are written. The CLI equivalent is `-rev-include ''`.
+destination assets are written. The CLI equivalent is `--rev-include ''`.
 Omitting `rev_exclude` (or setting it to an empty list) excludes nothing;
-`-rev-exclude ''` clears exclusions from the config file. Exclusion takes
+`--rev-exclude ''` clears exclusions from the config file. Exclusion takes
 priority over inclusion. Flags replace the corresponding file list rather than
 adding to it. This replaces `rev_ext` and `-rev-ext`; migrate existing
 selections to source-relative globs such as `**/*.css`.
