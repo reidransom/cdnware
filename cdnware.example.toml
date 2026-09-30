@@ -3,6 +3,10 @@ cdn = ""
 src = "assets"
 dest = "assets-rev"
 
+# File extensions of source assets whose references are rewritten before hashing.
+# Other assets are still revisioned. Set [] to disable asset-to-asset rewriting.
+rewrite_extensions = [".css", ".html", ".js", ".json", ".mjs", ".svg", ".toml", ".webmanifest", ".xml"]
+
 # rev_include is unset by default: revise every regular file in src.
 # To select paths instead, set rev_include = ["**/*.css", "images/logo-*.svg"].
 # Setting rev_include = [] revises nothing.

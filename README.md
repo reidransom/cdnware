@@ -34,6 +34,12 @@ unchanged; relative references from revisioned assets to excluded files become
 same-origin `/assets/...` URLs so they still resolve after the referring asset
 moves.
 
+Asset-to-asset reference rewriting applies only to configured file extensions,
+independently of which files are revisioned. For example,
+`--rewrite-ext .css --rewrite-ext .txt` rewrites references inside CSS and TXT
+assets and replaces the default extension list. Generated site-file rewriting
+is unchanged.
+
 Ex:
 
 ```
@@ -98,6 +104,7 @@ flag forms work (including `--name=value`); put flags before SITEROOT. Precedenc
 | `--dest` | `assets-rev` | Destination directory for revisioned assets |
 | `--rev-include` | _all files_ | Repeatable source-relative glob, e.g. `--rev-include '**/*.css'`; `--rev-include ''` revises none |
 | `--rev-exclude` | _no exclusions_ | Repeatable source-relative glob excluded from revisioning, e.g. `--rev-exclude '**/*.map'`; `--rev-exclude ''` clears configured exclusions |
+| `--rewrite-ext` | `.css`, `.html`, `.js`, `.json`, `.mjs`, `.svg`, `.toml`, `.webmanifest`, `.xml` | Repeatable asset extension whose references are rewritten before hashing; `--rewrite-ext ''` disables asset-to-asset rewriting |
 | `--config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
@@ -107,7 +114,7 @@ If `--config` is not given, cdnware looks in SITEROOT then CWD for, in order:
 
 [`cdnware.example.toml`](cdnware.example.toml) is embedded in the binary at
 build time and loaded first. Settings omitted from a site config inherit its
-values, even when `-config -` disables auto-discovery. Edit the example and
+values, even when `--config -` disables auto-discovery. Edit the example and
 rebuild to change the shipped defaults; use a site config or flags for local
 overrides. The embedded file leaves `rev_include` unset because the default
 is to revise every file; `rev_include = []` would instead revise nothing.
@@ -120,6 +127,7 @@ src = "assets"
 dest = "assets-rev"
 rev_include = ["**/*.css", "**/*.js", "images/logo-*.svg"]
 rev_exclude = ["**/*.map"]
+rewrite_extensions = [".css", ".js", ".txt"]
 ```
 
 ```yaml
@@ -129,6 +137,7 @@ src: assets
 dest: assets-rev
 rev_include: ["**/*.css", "**/*.js", "images/logo-*.svg"]
 rev_exclude: ["**/*.map"]
+rewrite_extensions: [".css", ".js", ".txt"]
 ```
 
 ```json
@@ -137,7 +146,8 @@ rev_exclude: ["**/*.map"]
   "src": "assets",
   "dest": "assets-rev",
   "rev_include": ["**/*.css", "**/*.js", "images/logo-*.svg"],
-  "rev_exclude": ["**/*.map"]
+  "rev_exclude": ["**/*.map"],
+  "rewrite_extensions": [".css", ".js", ".txt"]
 }
 ```
 
@@ -151,6 +161,14 @@ Omitting `rev_exclude` (or setting it to an empty list) excludes nothing;
 priority over inclusion. Flags replace the corresponding file list rather than
 adding to it. This replaces `rev_ext` and `-rev-ext`; migrate existing
 selections to source-relative globs such as `**/*.css`.
+
+`rewrite_extensions` is a case-insensitive list of extensions starting with
+`.`. It controls which source assets have references rewritten **before**
+hashing; it does not filter assets from revisioning. A configured list or
+`--rewrite-ext` replaces the entire default list, not just one extension.
+An empty list (or `--rewrite-ext ''`) disables asset-to-asset rewriting while
+still revisioning files. Generated site files use their existing fixed set of
+textual extensions and are not affected.
 
 Both include and exclude patterns match paths relative to `src`, with `/`
 separators and case-insensitive matching. `*` matches within one path segment,

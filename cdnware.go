@@ -28,20 +28,22 @@ var defaultConfig []byte
 // Config holds file-backed settings. Pointer fields distinguish omitted
 // values from explicit empty values.
 type Config struct {
-	Cdn        *string   `toml:"cdn" yaml:"cdn" json:"cdn,omitempty"`
-	Src        *string   `toml:"src" yaml:"src" json:"src,omitempty"`
-	Dest       *string   `toml:"dest" yaml:"dest" json:"dest,omitempty"`
-	RevInclude *[]string `toml:"rev_include" yaml:"rev_include" json:"rev_include,omitempty"`
-	RevExclude *[]string `toml:"rev_exclude" yaml:"rev_exclude" json:"rev_exclude,omitempty"`
+	Cdn               *string   `toml:"cdn" yaml:"cdn" json:"cdn,omitempty"`
+	Src               *string   `toml:"src" yaml:"src" json:"src,omitempty"`
+	Dest              *string   `toml:"dest" yaml:"dest" json:"dest,omitempty"`
+	RevInclude        *[]string `toml:"rev_include" yaml:"rev_include" json:"rev_include,omitempty"`
+	RevExclude        *[]string `toml:"rev_exclude" yaml:"rev_exclude" json:"rev_exclude,omitempty"`
+	RewriteExtensions *[]string `toml:"rewrite_extensions" yaml:"rewrite_extensions" json:"rewrite_extensions,omitempty"`
 }
 
 type Settings struct {
-	BaseDir    string
-	Cdn        string
-	Src        string
-	Dest       string
-	RevInclude []string
-	RevExclude []string
+	BaseDir           string
+	Cdn               string
+	Src               string
+	Dest              string
+	RevInclude        []string
+	RevExclude        []string
+	RewriteExtensions []string
 }
 
 type asset struct {
@@ -52,14 +54,15 @@ type asset struct {
 }
 
 type revisioner struct {
-	baseDir  string
-	srcDir   string
-	destDir  string
-	cdn      string
-	assets   map[string]asset
-	excluded map[string]string
-	state    map[string]uint8
-	result   map[string]string
+	baseDir           string
+	srcDir            string
+	destDir           string
+	cdn               string
+	assets            map[string]asset
+	excluded          map[string]string
+	state             map[string]uint8
+	result            map[string]string
+	rewriteExtensions map[string]bool
 }
 
 func hashReader(reader io.Reader) (string, error) {
@@ -109,19 +112,23 @@ func publicURL(cdn, path string) string {
 	return strings.TrimRight(cdn, "/") + path
 }
 
-func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude []string) (*revisioner, error) {
+func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude, rewriteExtensions []string) (*revisioner, error) {
 	if filepath.Clean(srcDir) == filepath.Clean(destDir) {
 		return nil, errors.New("source and destination directories must differ")
 	}
 
 	r := &revisioner{
-		baseDir: baseDir,
-		srcDir:  filepath.Clean(srcDir),
-		destDir: filepath.Clean(destDir),
-		cdn:     cdn,
-		assets:  make(map[string]asset),
-		state:   make(map[string]uint8),
-		result:  make(map[string]string),
+		baseDir:           baseDir,
+		srcDir:            filepath.Clean(srcDir),
+		destDir:           filepath.Clean(destDir),
+		cdn:               cdn,
+		assets:            make(map[string]asset),
+		state:             make(map[string]uint8),
+		result:            make(map[string]string),
+		rewriteExtensions: make(map[string]bool, len(rewriteExtensions)),
+	}
+	for _, extension := range rewriteExtensions {
+		r.rewriteExtensions[extension] = true
 	}
 	if revInclude != nil || len(revExclude) != 0 {
 		r.excluded = make(map[string]string)
@@ -177,13 +184,8 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude 
 	return r, nil
 }
 
-func isRewritableAsset(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".css", ".html", ".js", ".json", ".mjs", ".svg", ".toml", ".webmanifest", ".xml":
-		return true
-	default:
-		return false
-	}
+func (r *revisioner) isRewritableAsset(path string) bool {
+	return r.rewriteExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
 // referenceIndex ignores matches that are prefixes of longer asset paths.
@@ -298,7 +300,7 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", current.path, err)
 	}
-	if isRewritableAsset(current.path) {
+	if r.isRewritableAsset(current.path) {
 		for _, replacement := range r.dependencies(current, content) {
 			dependencyURL := replacement.url
 			if _, selected := r.assets[replacement.url]; selected {
@@ -347,7 +349,9 @@ func (r *revisioner) revise() (map[string]string, error) {
 }
 
 func rev(baseDir, cdn, srcDir, destDir string) map[string]string {
-	revisioner, err := newRevisioner(baseDir, cdn, srcDir, destDir, nil, nil)
+	defaults, err := loadDefaultConfig()
+	check(err)
+	revisioner, err := newRevisioner(baseDir, cdn, srcDir, destDir, nil, nil, *defaults.RewriteExtensions)
 	check(err)
 	manifest, err := revisioner.revise()
 	check(err)
@@ -442,8 +446,8 @@ func loadDefaultConfig() (*Config, error) {
 	if err := toml.Unmarshal(defaultConfig, cfg); err != nil {
 		return nil, fmt.Errorf("parsing embedded cdnware.example.toml: %w", err)
 	}
-	if cfg.Cdn == nil || cfg.Src == nil || cfg.Dest == nil {
-		return nil, errors.New("embedded cdnware.example.toml must define cdn, src, and dest")
+	if cfg.Cdn == nil || cfg.Src == nil || cfg.Dest == nil || cfg.RewriteExtensions == nil {
+		return nil, errors.New("embedded cdnware.example.toml must define cdn, src, dest, and rewrite_extensions")
 	}
 	return cfg, nil
 }
@@ -466,13 +470,14 @@ func discoverConfig(siteroot string) string {
 }
 
 type flagSet struct {
-	fs         *flag.FlagSet
-	cdn        string
-	src        string
-	dest       string
-	revInclude patternFlags
-	revExclude patternFlags
-	configPath string
+	fs                *flag.FlagSet
+	cdn               string
+	src               string
+	dest              string
+	revInclude        patternFlags
+	revExclude        patternFlags
+	rewriteExtensions patternFlags
+	configPath        string
 }
 
 func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, explicit map[string]bool) (Settings, error) {
@@ -483,6 +488,7 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		Dest:    *defaults.Dest,
 	}
 	revInclude, revExclude := defaults.RevInclude, defaults.RevExclude
+	rewriteExtensions := defaults.RewriteExtensions
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -498,6 +504,9 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		}
 		if fileCfg.RevExclude != nil {
 			revExclude = fileCfg.RevExclude
+		}
+		if fileCfg.RewriteExtensions != nil {
+			rewriteExtensions = fileCfg.RewriteExtensions
 		}
 	}
 	if explicit["cdn"] {
@@ -523,6 +532,13 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		}
 		revExclude = &entries
 	}
+	if explicit["rewrite-ext"] {
+		entries := []string(fs.rewriteExtensions)
+		if len(entries) == 1 && entries[0] == "" {
+			entries = []string{}
+		}
+		rewriteExtensions = &entries
+	}
 	if revInclude != nil {
 		var err error
 		settings.RevInclude, err = parseRevPatterns(*revInclude, "rev_include")
@@ -537,6 +553,11 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 			return Settings{}, err
 		}
 	}
+	extensions, err := parseRewriteExtensions(*rewriteExtensions)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.RewriteExtensions = extensions
 	return settings, nil
 }
 
@@ -573,6 +594,28 @@ func parseRevPatterns(entries []string, option string) ([]string, error) {
 	return patterns, nil
 }
 
+func parseRewriteExtensions(entries []string) ([]string, error) {
+	extensions := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		extension := strings.ToLower(strings.TrimSpace(entry))
+		if len(extension) < 2 || extension[0] != '.' {
+			return nil, fmt.Errorf("invalid rewrite extension %q: expected a file extension starting with .", entry)
+		}
+		for _, c := range extension[1:] {
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+				return nil, fmt.Errorf("invalid rewrite extension %q: expected a file extension starting with .", entry)
+			}
+		}
+		if seen[extension] {
+			return nil, fmt.Errorf("duplicate rewrite extension %q", entry)
+		}
+		seen[extension] = true
+		extensions = append(extensions, extension)
+	}
+	return extensions, nil
+}
+
 func getUsage() string {
 	return "Usage of cdnware:\n\n$ cdnware [OPTIONS] [SITEROOT]\n\nOptions accept -name or --name (for example, --src assets).\n"
 }
@@ -588,6 +631,7 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.StringVar(&fs.dest, "dest", *defaults.Dest, "destination directory for revisioned assets, relative to SITEROOT")
 	fs.fs.Var(&fs.revInclude, "rev-include", "glob of source-relative paths to revise (repeatable, e.g. **/*.css); empty revises nothing")
 	fs.fs.Var(&fs.revExclude, "rev-exclude", "glob of source-relative paths not to revise (repeatable); empty excludes nothing")
+	fs.fs.Var(&fs.rewriteExtensions, "rewrite-ext", "asset extension whose references are rewritten before hashing (repeatable, e.g. .css); empty disables asset rewriting")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())
@@ -626,7 +670,7 @@ func loadSettings(args []string) (Settings, error) {
 func main() {
 	settings, err := loadSettings(os.Args[1:])
 	check(err)
-	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude, settings.RevExclude)
+	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude, settings.RevExclude, settings.RewriteExtensions)
 	check(err)
 	manifest, err := revisioner.revise()
 	check(err)

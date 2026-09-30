@@ -128,7 +128,7 @@ func TestRevRejectsAssetReferenceCycles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "assets/a.js"), `import "./b.js";`)
 	writeTestFile(t, filepath.Join(root, "assets/b.js"), `import "./a.js";`)
 
-	revisioner, err := newRevisioner(root, "", "assets", "assets-rev", nil, nil)
+	revisioner, err := newRevisioner(root, "", "assets", "assets-rev", nil, nil, []string{".js"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestPublicURL(t *testing.T) {
 
 func TestSourceAndDestinationMustDiffer(t *testing.T) {
 	root := t.TempDir()
-	if _, err := newRevisioner(root, "", "assets", "assets", nil, nil); err == nil {
+	if _, err := newRevisioner(root, "", "assets", "assets", nil, nil, nil); err == nil {
 		t.Fatal("expected matching source and destination directories to fail")
 	}
 }
@@ -368,6 +368,7 @@ func TestCLIUsesEmbeddedConfigAsFallback(t *testing.T) {
 src = "media"
 dest = "media-rev"
 rev_include = ["**/*.css"]
+rewrite_extensions = [".css"]
 `)
 	binary := filepath.Join(root, "cdnware")
 	build := exec.Command("go", "build", "-o", binary, ".")
@@ -482,6 +483,86 @@ func TestCLIExcludesAssetsAndPreservesReferences(t *testing.T) {
 	site, err := os.ReadFile(index)
 	if err != nil || string(site) != `<link href="`+manifest["/assets/css/app.css"]+`"><a href="/assets/css/app.css.map"><img src="/assets/images/icon.png">` {
 		t.Fatalf("site = %q, err=%v", site, err)
+	}
+}
+
+func TestCLIConfiguresAssetRewriteExtensions(t *testing.T) {
+	for _, tc := range []struct {
+		name, filename, config  string
+		flags                   []string
+		rewriteText, rewriteCSS bool
+	}{
+		{name: "default", flags: []string{"--config", "-"}, rewriteCSS: true},
+		{name: "toml", filename: "cdnware.toml", config: `rewrite_extensions = [".TXT"]`, rewriteText: true},
+		{name: "yaml", filename: "cdnware.yaml", config: "rewrite_extensions:\n  - .TXT\n", rewriteText: true},
+		{name: "json", filename: "cdnware.json", config: `{"rewrite_extensions":[".TXT"]}`, rewriteText: true},
+		{name: "empty file", filename: "cdnware.toml", config: `rewrite_extensions = []`},
+		{name: "flag overrides file", filename: "cdnware.toml", config: `rewrite_extensions = [".txt"]`, flags: []string{"--rewrite-ext", ".CSS"}, rewriteCSS: true},
+		{name: "empty flag", filename: "cdnware.toml", config: `rewrite_extensions = [".txt"]`, flags: []string{"--rewrite-ext", ""}},
+		{name: "repeated flags", flags: []string{"--config", "-", "--rewrite-ext", ".TXT", "--rewrite-ext", ".CSS"}, rewriteText: true, rewriteCSS: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "assets/icon.png"), "pixels")
+			writeTestFile(t, filepath.Join(root, "assets/app.TXT"), `ref=/assets/icon.png`)
+			writeTestFile(t, filepath.Join(root, "assets/app.CSS"), `ref=/assets/icon.png`)
+			if tc.filename != "" {
+				writeTestFile(t, filepath.Join(root, tc.filename), tc.config)
+			}
+			manifest, output, err := runCLI(t, append(tc.flags, root)...)
+			if err != nil {
+				t.Fatalf("cdnware: %v: %s", err, output)
+			}
+			if len(manifest) != 3 {
+				t.Fatalf("unselected assets: %v", manifest)
+			}
+			for _, file := range []struct {
+				name    string
+				rewrite bool
+			}{
+				{"app.TXT", tc.rewriteText},
+				{"app.CSS", tc.rewriteCSS},
+			} {
+				assetPath := destinationPath(t, root, manifest["/assets/"+file.name])
+				content, err := os.ReadFile(assetPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := "ref=/assets/icon.png"
+				if file.rewrite {
+					want = "ref=" + manifest["/assets/icon.png"]
+				}
+				if string(content) != want {
+					t.Fatalf("%s content = %q, want %q", file.name, content, want)
+				}
+				assertFilenameMatchesContent(t, assetPath)
+			}
+		})
+	}
+}
+
+func TestCLIRejectsInvalidRewriteExtensions(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		flags        []string
+	}{
+		{"glob flag", "", []string{"--rewrite-ext", "*.txt"}},
+		{"missing dot", "", []string{"--rewrite-ext", "txt"}},
+		{"empty with another extension", "", []string{"--rewrite-ext", ".css", "--rewrite-ext", ""}},
+		{"duplicate ignoring case", "", []string{"--rewrite-ext", ".CSS", "--rewrite-ext", ".css"}},
+		{"path in config", `rewrite_extensions = ["foo/bar"]`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "assets/icon.png"), "pixels")
+			if tc.config != "" {
+				writeTestFile(t, filepath.Join(root, "cdnware.toml"), tc.config)
+			}
+			_, output, err := runCLI(t, append(tc.flags, root)...)
+			if err == nil || !strings.Contains(output, "rewrite extension") {
+				t.Fatalf("expected invalid rewrite extension, got %v: %s", err, output)
+			}
+		})
 	}
 }
 
