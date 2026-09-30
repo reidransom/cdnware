@@ -128,7 +128,7 @@ func TestRevRejectsAssetReferenceCycles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "assets/a.js"), `import "./b.js";`)
 	writeTestFile(t, filepath.Join(root, "assets/b.js"), `import "./a.js";`)
 
-	revisioner, err := newRevisioner(root, "", "assets", "assets-rev", nil)
+	revisioner, err := newRevisioner(root, "", "assets", "assets-rev", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestPublicURL(t *testing.T) {
 
 func TestSourceAndDestinationMustDiffer(t *testing.T) {
 	root := t.TempDir()
-	if _, err := newRevisioner(root, "", "assets", "assets", nil); err == nil {
+	if _, err := newRevisioner(root, "", "assets", "assets", nil, nil); err == nil {
 		t.Fatal("expected matching source and destination directories to fail")
 	}
 }
@@ -458,25 +458,67 @@ func TestCLISelectsAssetGlobsAndPreservesExcludedReferences(t *testing.T) {
 	}
 }
 
+func TestCLIExcludesAssetsAndPreservesReferences(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "assets/css/app.css"), `@import "./base.css"; background: url("../images/icon.png"); /*# sourceMappingURL=./app.css.map */`)
+	writeTestFile(t, filepath.Join(root, "assets/css/base.css"), "body {}")
+	writeTestFile(t, filepath.Join(root, "assets/css/app.css.map"), "map")
+	writeTestFile(t, filepath.Join(root, "assets/images/icon.png"), "pixels")
+	writeTestFile(t, filepath.Join(root, "assets/images/photo.png"), "photo")
+	index := filepath.Join(root, "index.html")
+	writeTestFile(t, index, `<link href="/assets/css/app.css"><a href="/assets/css/app.css.map"><img src="/assets/images/icon.png">`)
+
+	manifest, output, err := runCLI(t, "-config", "-", "-rev-exclude", "css/base.css", "-rev-exclude", "images/*.PNG", "-rev-exclude", "**/*.map", root)
+	if err != nil {
+		t.Fatalf("cdnware: %v: %s", err, output)
+	}
+	if len(manifest) != 1 || manifest["/assets/css/app.css"] == "" {
+		t.Fatalf("excluded assets in manifest: %v", manifest)
+	}
+	css, err := os.ReadFile(destinationPath(t, root, manifest["/assets/css/app.css"]))
+	if err != nil || string(css) != `@import "/assets/css/base.css"; background: url("/assets/images/icon.png"); /*# sourceMappingURL=/assets/css/app.css.map */` {
+		t.Fatalf("revisioned CSS = %q, err=%v", css, err)
+	}
+	site, err := os.ReadFile(index)
+	if err != nil || string(site) != `<link href="`+manifest["/assets/css/app.css"]+`"><a href="/assets/css/app.css.map"><img src="/assets/images/icon.png">` {
+		t.Fatalf("site = %q, err=%v", site, err)
+	}
+}
+
 func TestCLIConfigSelectionsAndPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 	}{
-		{"toml", `rev_include = ["**/*.PNG"]`},
-		{"yaml", "rev_include:\n  - '**/*.PNG'\n"},
-		{"json", `{"rev_include":["**/*.PNG"]}`},
+		{"toml", `rev_include = ["**/*.PNG"]` + "\n" + `rev_exclude = ["pic.PNG"]`},
+		{"yaml", "rev_include:\n  - '**/*.PNG'\nrev_exclude:\n  - 'pic.PNG'\n"},
+		{"json", `{"rev_include":["**/*.PNG"],"rev_exclude":["pic.PNG"]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			writeTestFile(t, filepath.Join(root, "assets/app.css"), "body {}")
 			writeTestFile(t, filepath.Join(root, "assets/pic.PNG"), "pixels")
+			writeTestFile(t, filepath.Join(root, "assets/other.PNG"), "other")
 			writeTestFile(t, filepath.Join(root, "cdnware."+tc.name), tc.config)
 			manifest, output, err := runCLI(t, root)
 			if err != nil {
 				t.Fatalf("config run: %v: %s", err, output)
 			}
+			if len(manifest) != 1 || manifest["/assets/other.PNG"] == "" {
+				t.Fatalf("file selection and exclusion = %v", manifest)
+			}
+			manifest, output, err = runCLI(t, "-rev-exclude", "other.png", root)
+			if err != nil {
+				t.Fatalf("exclude override: %v: %s", err, output)
+			}
 			if len(manifest) != 1 || manifest["/assets/pic.PNG"] == "" {
-				t.Fatalf("file selection = %v", manifest)
+				t.Fatalf("flag exclusion = %v", manifest)
+			}
+			manifest, output, err = runCLI(t, "-rev-exclude", "", root)
+			if err != nil {
+				t.Fatalf("clear exclusion: %v: %s", err, output)
+			}
+			if len(manifest) != 2 || manifest["/assets/pic.PNG"] == "" || manifest["/assets/other.PNG"] == "" {
+				t.Fatalf("cleared exclusion = %v", manifest)
 			}
 			manifest, output, err = runCLI(t, "-rev-include", "**/*.CSS", root)
 			if err != nil {
@@ -523,7 +565,7 @@ func TestCLIExplicitEmptySelection(t *testing.T) {
 	}
 }
 
-func TestCLIRejectsInvalidIncludeGlobs(t *testing.T) {
+func TestCLIRejectsInvalidSelectionGlobs(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 		args         []string
@@ -534,7 +576,11 @@ func TestCLIRejectsInvalidIncludeGlobs(t *testing.T) {
 		{"duplicate case flag", "", []string{"-rev-include", "**/*.css", "-rev-include", "**/*.CSS"}},
 		{"malformed file", `rev_include = ["**/[foo"]`, nil},
 		{"parent file", `rev_include = ["../images/**"]`, nil},
-		{"duplicate file", `rev_include = ["**/*.js", "**/*.JS"]`, nil},
+		{"duplicate include file", `rev_include = ["**/*.js", "**/*.JS"]`, nil},
+		{"absolute exclude flag", "", []string{"-rev-exclude", "/images/**"}},
+		{"duplicate exclude flag", "", []string{"-rev-exclude", "**/*.js", "-rev-exclude", "**/*.JS"}},
+		{"parent exclude file", `rev_exclude = ["../images/**"]`, nil},
+		{"duplicate exclude file", `rev_exclude = ["**/*.js", "**/*.JS"]`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -543,8 +589,8 @@ func TestCLIRejectsInvalidIncludeGlobs(t *testing.T) {
 				writeTestFile(t, filepath.Join(root, "cdnware.toml"), tc.config)
 			}
 			_, output, err := runCLI(t, append(tc.args, root)...)
-			if err == nil || !strings.Contains(output, "rev_include pattern") {
-				t.Fatalf("expected extension error, got %v: %s", err, output)
+			if err == nil || !strings.Contains(output, "rev_") || !strings.Contains(output, "pattern") {
+				t.Fatalf("expected invalid glob error, got %v: %s", err, output)
 			}
 		})
 	}

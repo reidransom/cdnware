@@ -32,6 +32,7 @@ type Config struct {
 	Src        *string   `toml:"src" yaml:"src" json:"src,omitempty"`
 	Dest       *string   `toml:"dest" yaml:"dest" json:"dest,omitempty"`
 	RevInclude *[]string `toml:"rev_include" yaml:"rev_include" json:"rev_include,omitempty"`
+	RevExclude *[]string `toml:"rev_exclude" yaml:"rev_exclude" json:"rev_exclude,omitempty"`
 }
 
 type Settings struct {
@@ -40,6 +41,7 @@ type Settings struct {
 	Src        string
 	Dest       string
 	RevInclude []string
+	RevExclude []string
 }
 
 type asset struct {
@@ -107,7 +109,7 @@ func publicURL(cdn, path string) string {
 	return strings.TrimRight(cdn, "/") + path
 }
 
-func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude []string) (*revisioner, error) {
+func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude []string) (*revisioner, error) {
 	if filepath.Clean(srcDir) == filepath.Clean(destDir) {
 		return nil, errors.New("source and destination directories must differ")
 	}
@@ -121,7 +123,7 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude []string) (*
 		state:   make(map[string]uint8),
 		result:  make(map[string]string),
 	}
-	if revInclude != nil {
+	if revInclude != nil || len(revExclude) != 0 {
 		r.excluded = make(map[string]string)
 	}
 
@@ -139,13 +141,21 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude []string) (*
 			return err
 		}
 		url := "/" + filepath.ToSlash(filepath.Join(r.srcDir, rel))
-		if revInclude != nil {
-			selected := false
+		if revInclude != nil || len(revExclude) != 0 {
 			name := strings.ToLower(filepath.ToSlash(rel))
+			selected := revInclude == nil
 			for _, pattern := range revInclude {
 				if doublestar.MatchUnvalidated(pattern, name) {
 					selected = true
 					break
+				}
+			}
+			if selected {
+				for _, pattern := range revExclude {
+					if doublestar.MatchUnvalidated(pattern, name) {
+						selected = false
+						break
+					}
 				}
 			}
 			if !selected {
@@ -176,6 +186,51 @@ func isRewritableAsset(path string) bool {
 	}
 }
 
+// referenceIndex ignores matches that are prefixes of longer asset paths.
+func referenceIndex(content, url []byte) int {
+	for offset := 0; offset < len(content); {
+		index := bytes.Index(content[offset:], url)
+		if index < 0 {
+			break
+		}
+		index += offset
+		end := index + len(url)
+		if end == len(content) || !isAssetPathByte(content[end]) {
+			return index
+		}
+		offset = end
+	}
+	return -1
+}
+
+func isAssetPathByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
+		b >= '0' && b <= '9' || b >= 0x80 ||
+		b == '.' || b == '_' || b == '-' || b == '/' || b == '~' || b == '%'
+}
+
+func replaceAssetReference(content, old, target []byte) []byte {
+	var result []byte
+	start := 0
+	for start < len(content) {
+		index := referenceIndex(content[start:], old)
+		if index < 0 {
+			break
+		}
+		index += start
+		if result == nil {
+			result = make([]byte, 0, len(content)+len(target))
+		}
+		result = append(result, content[start:index]...)
+		result = append(result, target...)
+		start = index + len(old)
+	}
+	if result == nil {
+		return content
+	}
+	return append(result, content[start:]...)
+}
+
 type replacement struct {
 	old string
 	url string
@@ -189,7 +244,7 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if dependency.url == current.url {
 			continue
 		}
-		if bytes.Contains(content, []byte(sourceURL)) {
+		if referenceIndex(content, []byte(sourceURL)) >= 0 {
 			replacements = append(replacements, replacement{old: sourceURL, url: dependency.url})
 		}
 
@@ -201,7 +256,7 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if !strings.HasPrefix(rel, ".") {
 			rel = "./" + rel
 		}
-		if bytes.Contains(content, []byte(rel)) {
+		if referenceIndex(content, []byte(rel)) >= 0 {
 			replacements = append(replacements, replacement{old: rel, url: dependency.url})
 		}
 	}
@@ -214,7 +269,7 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if !strings.HasPrefix(rel, ".") {
 			rel = "./" + rel
 		}
-		if bytes.Contains(content, []byte(rel)) {
+		if referenceIndex(content, []byte(rel)) >= 0 {
 			replacements = append(replacements, replacement{old: rel, url: sourceURL})
 		}
 	}
@@ -252,7 +307,7 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 					return "", err
 				}
 			}
-			content = bytes.ReplaceAll(content, []byte(replacement.old), []byte(dependencyURL))
+			content = replaceAssetReference(content, []byte(replacement.old), []byte(dependencyURL))
 		}
 	}
 
@@ -292,7 +347,7 @@ func (r *revisioner) revise() (map[string]string, error) {
 }
 
 func rev(baseDir, cdn, srcDir, destDir string) map[string]string {
-	revisioner, err := newRevisioner(baseDir, cdn, srcDir, destDir, nil)
+	revisioner, err := newRevisioner(baseDir, cdn, srcDir, destDir, nil, nil)
 	check(err)
 	manifest, err := revisioner.revise()
 	check(err)
@@ -321,7 +376,7 @@ func repFile(path string, manifest map[string]string) error {
 	}
 	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
 	for _, sourceURL := range keys {
-		content = bytes.ReplaceAll(content, []byte(sourceURL), []byte(manifest[sourceURL]))
+		content = replaceAssetReference(content, []byte(sourceURL), []byte(manifest[sourceURL]))
 	}
 	if bytes.Equal(content, original) {
 		return nil
@@ -415,7 +470,8 @@ type flagSet struct {
 	cdn        string
 	src        string
 	dest       string
-	revInclude includeFlags
+	revInclude patternFlags
+	revExclude patternFlags
 	configPath string
 }
 
@@ -426,7 +482,7 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		Src:     *defaults.Src,
 		Dest:    *defaults.Dest,
 	}
-	revInclude := defaults.RevInclude
+	revInclude, revExclude := defaults.RevInclude, defaults.RevExclude
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -440,6 +496,9 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		if fileCfg.RevInclude != nil {
 			revInclude = fileCfg.RevInclude
 		}
+		if fileCfg.RevExclude != nil {
+			revExclude = fileCfg.RevExclude
+		}
 	}
 	if explicit["cdn"] {
 		settings.Cdn = fs.cdn
@@ -451,16 +510,29 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		settings.Dest = fs.dest
 	}
 	if explicit["rev-include"] {
-		if len(fs.revInclude) == 1 && fs.revInclude[0] == "" {
-			settings.RevInclude = []string{}
-			return settings, nil
-		}
 		entries := []string(fs.revInclude)
+		if len(entries) == 1 && entries[0] == "" {
+			entries = []string{}
+		}
 		revInclude = &entries
+	}
+	if explicit["rev-exclude"] {
+		entries := []string(fs.revExclude)
+		if len(entries) == 1 && entries[0] == "" {
+			entries = []string{}
+		}
+		revExclude = &entries
 	}
 	if revInclude != nil {
 		var err error
-		settings.RevInclude, err = parseRevInclude(*revInclude)
+		settings.RevInclude, err = parseRevPatterns(*revInclude, "rev_include")
+		if err != nil {
+			return Settings{}, err
+		}
+	}
+	if revExclude != nil {
+		var err error
+		settings.RevExclude, err = parseRevPatterns(*revExclude, "rev_exclude")
 		if err != nil {
 			return Settings{}, err
 		}
@@ -468,32 +540,32 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	return settings, nil
 }
 
-type includeFlags []string
+type patternFlags []string
 
-func (includes *includeFlags) String() string {
-	return strings.Join(*includes, ",")
+func (patterns *patternFlags) String() string {
+	return strings.Join(*patterns, ",")
 }
 
-func (includes *includeFlags) Set(pattern string) error {
-	*includes = append(*includes, pattern)
+func (patterns *patternFlags) Set(pattern string) error {
+	*patterns = append(*patterns, pattern)
 	return nil
 }
 
-func parseRevInclude(entries []string) ([]string, error) {
+func parseRevPatterns(entries []string, option string) ([]string, error) {
 	patterns := make([]string, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		pattern := strings.ToLower(strings.TrimSpace(entry))
 		if pattern == "" || strings.HasPrefix(pattern, "/") || strings.Contains(pattern, `\`) || !doublestar.ValidatePattern(pattern) {
-			return nil, fmt.Errorf("invalid rev_include pattern %q: expected a relative glob with / separators", entry)
+			return nil, fmt.Errorf("invalid %s pattern %q: expected a relative glob with / separators", option, entry)
 		}
 		for _, part := range strings.Split(pattern, "/") {
 			if part == "" || part == "." || part == ".." {
-				return nil, fmt.Errorf("invalid rev_include pattern %q: expected a relative glob with / separators", entry)
+				return nil, fmt.Errorf("invalid %s pattern %q: expected a relative glob with / separators", option, entry)
 			}
 		}
 		if seen[pattern] {
-			return nil, fmt.Errorf("duplicate rev_include pattern %q", entry)
+			return nil, fmt.Errorf("duplicate %s pattern %q", option, entry)
 		}
 		seen[pattern] = true
 		patterns = append(patterns, pattern)
@@ -515,6 +587,7 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.StringVar(&fs.src, "src", *defaults.Src, "source directory for assets, relative to SITEROOT")
 	fs.fs.StringVar(&fs.dest, "dest", *defaults.Dest, "destination directory for revisioned assets, relative to SITEROOT")
 	fs.fs.Var(&fs.revInclude, "rev-include", "glob of source-relative paths to revise (repeatable, e.g. **/*.css); empty revises nothing")
+	fs.fs.Var(&fs.revExclude, "rev-exclude", "glob of source-relative paths not to revise (repeatable); empty excludes nothing")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())
@@ -553,7 +626,7 @@ func loadSettings(args []string) (Settings, error) {
 func main() {
 	settings, err := loadSettings(os.Args[1:])
 	check(err)
-	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude)
+	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude, settings.RevExclude)
 	check(err)
 	manifest, err := revisioner.revise()
 	check(err)

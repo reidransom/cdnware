@@ -6,3 +6,7 @@ dest = "assets-rev"
 # rev_include is unset by default: revise every regular file in src.
 # To select paths instead, set rev_include = ["**/*.css", "images/logo-*.svg"].
 # Setting rev_include = [] revises nothing.
+
+# rev_exclude is unset by default: exclude no source assets.
+# To omit paths, set rev_exclude = ["**/*.map", "images/private/**"].
+# Setting rev_exclude = [] excludes nothing, even when overriding embedded defaults.
