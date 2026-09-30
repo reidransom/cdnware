@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,18 +28,18 @@ var defaultConfig []byte
 // Config holds file-backed settings. Pointer fields distinguish omitted
 // values from explicit empty values.
 type Config struct {
-	Cdn    *string   `toml:"cdn" yaml:"cdn" json:"cdn,omitempty"`
-	Src    *string   `toml:"src" yaml:"src" json:"src,omitempty"`
-	Dest   *string   `toml:"dest" yaml:"dest" json:"dest,omitempty"`
-	RevExt *[]string `toml:"rev_ext" yaml:"rev_ext" json:"rev_ext,omitempty"`
+	Cdn        *string   `toml:"cdn" yaml:"cdn" json:"cdn,omitempty"`
+	Src        *string   `toml:"src" yaml:"src" json:"src,omitempty"`
+	Dest       *string   `toml:"dest" yaml:"dest" json:"dest,omitempty"`
+	RevInclude *[]string `toml:"rev_include" yaml:"rev_include" json:"rev_include,omitempty"`
 }
 
 type Settings struct {
-	BaseDir string
-	Cdn     string
-	Src     string
-	Dest    string
-	RevExt  map[string]bool
+	BaseDir    string
+	Cdn        string
+	Src        string
+	Dest       string
+	RevInclude []string
 }
 
 type asset struct {
@@ -106,7 +107,7 @@ func publicURL(cdn, path string) string {
 	return strings.TrimRight(cdn, "/") + path
 }
 
-func newRevisioner(baseDir, cdn, srcDir, destDir string, revExt map[string]bool) (*revisioner, error) {
+func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude []string) (*revisioner, error) {
 	if filepath.Clean(srcDir) == filepath.Clean(destDir) {
 		return nil, errors.New("source and destination directories must differ")
 	}
@@ -120,7 +121,7 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revExt map[string]bool)
 		state:   make(map[string]uint8),
 		result:  make(map[string]string),
 	}
-	if revExt != nil {
+	if revInclude != nil {
 		r.excluded = make(map[string]string)
 	}
 
@@ -138,9 +139,19 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revExt map[string]bool)
 			return err
 		}
 		url := "/" + filepath.ToSlash(filepath.Join(r.srcDir, rel))
-		if revExt != nil && !revExt[strings.ToLower(filepath.Ext(rel))] {
-			r.excluded[url] = rel
-			return nil
+		if revInclude != nil {
+			selected := false
+			name := strings.ToLower(filepath.ToSlash(rel))
+			for _, pattern := range revInclude {
+				if doublestar.MatchUnvalidated(pattern, name) {
+					selected = true
+					break
+				}
+			}
+			if !selected {
+				r.excluded[url] = rel
+				return nil
+			}
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -404,7 +415,7 @@ type flagSet struct {
 	cdn        string
 	src        string
 	dest       string
-	revExt     string
+	revInclude includeFlags
 	configPath string
 }
 
@@ -415,7 +426,7 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		Src:     *defaults.Src,
 		Dest:    *defaults.Dest,
 	}
-	revExt := defaults.RevExt
+	revInclude := defaults.RevInclude
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -426,8 +437,8 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 		if fileCfg.Dest != nil {
 			settings.Dest = *fileCfg.Dest
 		}
-		if fileCfg.RevExt != nil {
-			revExt = fileCfg.RevExt
+		if fileCfg.RevInclude != nil {
+			revInclude = fileCfg.RevInclude
 		}
 	}
 	if explicit["cdn"] {
@@ -439,17 +450,17 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	if explicit["dest"] {
 		settings.Dest = fs.dest
 	}
-	if explicit["rev-ext"] {
-		if fs.revExt == "" {
-			settings.RevExt = map[string]bool{}
+	if explicit["rev-include"] {
+		if len(fs.revInclude) == 1 && fs.revInclude[0] == "" {
+			settings.RevInclude = []string{}
 			return settings, nil
 		}
-		entries := strings.Split(fs.revExt, ",")
-		revExt = &entries
+		entries := []string(fs.revInclude)
+		revInclude = &entries
 	}
-	if revExt != nil {
+	if revInclude != nil {
 		var err error
-		settings.RevExt, err = parseRevExt(*revExt)
+		settings.RevInclude, err = parseRevInclude(*revInclude)
 		if err != nil {
 			return Settings{}, err
 		}
@@ -457,24 +468,37 @@ func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, expli
 	return settings, nil
 }
 
-func parseRevExt(entries []string) (map[string]bool, error) {
-	selected := make(map[string]bool, len(entries))
+type includeFlags []string
+
+func (includes *includeFlags) String() string {
+	return strings.Join(*includes, ",")
+}
+
+func (includes *includeFlags) Set(pattern string) error {
+	*includes = append(*includes, pattern)
+	return nil
+}
+
+func parseRevInclude(entries []string) ([]string, error) {
+	patterns := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
 	for _, entry := range entries {
-		ext := strings.ToLower(strings.TrimSpace(entry))
-		if len(ext) < 2 || ext[0] != '.' {
-			return nil, fmt.Errorf("invalid rev_ext extension %q: expected a leading dot and letters or digits", entry)
+		pattern := strings.ToLower(strings.TrimSpace(entry))
+		if pattern == "" || strings.HasPrefix(pattern, "/") || strings.Contains(pattern, `\`) || !doublestar.ValidatePattern(pattern) {
+			return nil, fmt.Errorf("invalid rev_include pattern %q: expected a relative glob with / separators", entry)
 		}
-		for _, c := range ext[1:] {
-			if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
-				return nil, fmt.Errorf("invalid rev_ext extension %q: expected a leading dot and letters or digits", entry)
+		for _, part := range strings.Split(pattern, "/") {
+			if part == "" || part == "." || part == ".." {
+				return nil, fmt.Errorf("invalid rev_include pattern %q: expected a relative glob with / separators", entry)
 			}
 		}
-		if selected[ext] {
-			return nil, fmt.Errorf("duplicate rev_ext extension %q", entry)
+		if seen[pattern] {
+			return nil, fmt.Errorf("duplicate rev_include pattern %q", entry)
 		}
-		selected[ext] = true
+		seen[pattern] = true
+		patterns = append(patterns, pattern)
 	}
-	return selected, nil
+	return patterns, nil
 }
 
 func getUsage() string {
@@ -490,7 +514,7 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.StringVar(&fs.cdn, "cdn", *defaults.Cdn, "CDN base URL")
 	fs.fs.StringVar(&fs.src, "src", *defaults.Src, "source directory for assets, relative to SITEROOT")
 	fs.fs.StringVar(&fs.dest, "dest", *defaults.Dest, "destination directory for revisioned assets, relative to SITEROOT")
-	fs.fs.StringVar(&fs.revExt, "rev-ext", "", "comma-separated extensions to revise (e.g. .css,.js); empty revises nothing")
+	fs.fs.Var(&fs.revInclude, "rev-include", "glob of source-relative paths to revise (repeatable, e.g. **/*.css); empty revises nothing")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())
@@ -529,7 +553,7 @@ func loadSettings(args []string) (Settings, error) {
 func main() {
 	settings, err := loadSettings(os.Args[1:])
 	check(err)
-	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevExt)
+	revisioner, err := newRevisioner(settings.BaseDir, settings.Cdn, settings.Src, settings.Dest, settings.RevInclude)
 	check(err)
 	manifest, err := revisioner.revise()
 	check(err)

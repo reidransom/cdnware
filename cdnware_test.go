@@ -367,7 +367,7 @@ func TestCLIUsesEmbeddedConfigAsFallback(t *testing.T) {
 	writeTestFile(t, filepath.Join(buildDir, "cdnware.example.toml"), `cdn = "https://base.example"
 src = "media"
 dest = "media-rev"
-rev_ext = [".css"]
+rev_include = ["**/*.css"]
 `)
 	binary := filepath.Join(root, "cdnware")
 	build := exec.Command("go", "build", "-o", binary, ".")
@@ -385,7 +385,7 @@ rev_ext = [".css"]
 	}{
 		{"base without user config", "-", "https://base.example", "/media/app.css", nil},
 		{"partial user config", filepath.Join(site, "cdnware.toml"), "https://site.example", "/media/app.css", nil},
-		{"flag overrides base selection", "-", "https://base.example", "/media/icon.png", []string{"-rev-ext", ".png"}},
+		{"flag overrides base selection", "-", "https://base.example", "/media/icon.png", []string{"-rev-include", "**/*.png"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.config != "-" {
@@ -407,24 +407,29 @@ rev_ext = [".css"]
 	}
 }
 
-func TestCLISelectsExtensionsAndPreservesExcludedReferences(t *testing.T) {
+func TestCLISelectsAssetGlobsAndPreservesExcludedReferences(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "assets/css/app.CSS"), `@import "./base.css"; background: url("../images/icon.PNG");`)
 	writeTestFile(t, filepath.Join(root, "assets/css/base.css"), `body { color: blue; }`)
 	writeTestFile(t, filepath.Join(root, "assets/js/app.JS"), `const img = "/assets/images/icon.PNG";`)
 	writeTestFile(t, filepath.Join(root, "assets/images/icon.PNG"), "pixels")
+	writeTestFile(t, filepath.Join(root, "assets/images/logo-mark.svg"), "<svg/>")
+	writeTestFile(t, filepath.Join(root, "assets/images/other.svg"), "<svg/>")
 	index := filepath.Join(root, "index.html")
 	writeTestFile(t, index, `<link href="/assets/css/app.CSS"><script src="/assets/js/app.JS"></script><img src="/assets/images/icon.PNG">`)
 
-	manifest, output, err := runCLI(t, "-config", "-", "-cdn", "https://cdn.example.com", "-rev-ext", ".css,.js", root)
+	manifest, output, err := runCLI(t, "-config", "-", "-cdn", "https://cdn.example.com", "-rev-include", "**/*.css", "-rev-include", "**/*.js", "-rev-include", "images/{logo-*,badge}.svg", root)
 	if err != nil {
 		t.Fatalf("cdnware: %v: %s", err, output)
 	}
-	if len(manifest) != 3 || manifest["/assets/css/app.CSS"] == "" || manifest["/assets/css/base.css"] == "" || manifest["/assets/js/app.JS"] == "" {
+	if len(manifest) != 4 || manifest["/assets/css/app.CSS"] == "" || manifest["/assets/css/base.css"] == "" || manifest["/assets/js/app.JS"] == "" || manifest["/assets/images/logo-mark.svg"] == "" {
 		t.Fatalf("selected manifest = %v", manifest)
 	}
 	if _, ok := manifest["/assets/images/icon.PNG"]; ok {
 		t.Fatalf("excluded PNG in manifest: %v", manifest)
+	}
+	if _, ok := manifest["/assets/images/other.svg"]; ok {
+		t.Fatalf("nonmatching SVG in manifest: %v", manifest)
 	}
 	cssPath := filepath.Join(root, strings.TrimPrefix(manifest["/assets/css/app.CSS"], "https://cdn.example.com/"))
 	css, err := os.ReadFile(cssPath)
@@ -448,8 +453,8 @@ func TestCLISelectsExtensionsAndPreservesExcludedReferences(t *testing.T) {
 		t.Fatalf("site references = %q", site)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "assets-rev/images"))
-	if !os.IsNotExist(err) || len(entries) != 0 {
-		t.Fatalf("excluded PNG was emitted: entries=%v err=%v", entries, err)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "logo-mark.") {
+		t.Fatalf("nonmatching assets were emitted: entries=%v err=%v", entries, err)
 	}
 }
 
@@ -457,9 +462,9 @@ func TestCLIConfigSelectionsAndPrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 	}{
-		{"toml", `rev_ext = [".PNG"]`},
-		{"yaml", "rev_ext:\n  - .PNG\n"},
-		{"json", `{"rev_ext":[".PNG"]}`},
+		{"toml", `rev_include = ["**/*.PNG"]`},
+		{"yaml", "rev_include:\n  - '**/*.PNG'\n"},
+		{"json", `{"rev_include":["**/*.PNG"]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -473,7 +478,7 @@ func TestCLIConfigSelectionsAndPrecedence(t *testing.T) {
 			if len(manifest) != 1 || manifest["/assets/pic.PNG"] == "" {
 				t.Fatalf("file selection = %v", manifest)
 			}
-			manifest, output, err = runCLI(t, "-rev-ext", ".CSS", root)
+			manifest, output, err = runCLI(t, "-rev-include", "**/*.CSS", root)
 			if err != nil {
 				t.Fatalf("flag run: %v: %s", err, output)
 			}
@@ -489,10 +494,10 @@ func TestCLIExplicitEmptySelection(t *testing.T) {
 		name, filename, config string
 		args                   []string
 	}{
-		{"toml", "cdnware.toml", `rev_ext = []`, nil},
-		{"yaml", "cdnware.yml", `rev_ext: []`, nil},
-		{"json", "cdnware.json", `{"rev_ext":[]}`, nil},
-		{"flag overrides file", "cdnware.toml", `rev_ext = [".css"]`, []string{"-rev-ext", ""}},
+		{"toml", "cdnware.toml", `rev_include = []`, nil},
+		{"yaml", "cdnware.yml", `rev_include: []`, nil},
+		{"json", "cdnware.json", `{"rev_include":[]}`, nil},
+		{"flag overrides file", "cdnware.toml", `rev_include = ["**/*.css"]`, []string{"-rev-include", ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -518,16 +523,18 @@ func TestCLIExplicitEmptySelection(t *testing.T) {
 	}
 }
 
-func TestCLIRejectsInvalidExtensions(t *testing.T) {
+func TestCLIRejectsInvalidIncludeGlobs(t *testing.T) {
 	for _, tc := range []struct {
 		name, config string
 		args         []string
 	}{
-		{"missing dot flag", "", []string{"-rev-ext", "css"}},
-		{"empty entry flag", "", []string{"-rev-ext", ".css,"}},
-		{"duplicate case flag", "", []string{"-rev-ext", ".css,.CSS"}},
-		{"malformed file", `rev_ext = [".css", "../js"]`, nil},
-		{"duplicate file", `rev_ext = [".js", ".JS"]`, nil},
+		{"empty extra flag", "", []string{"-rev-include", "**/*.css", "-rev-include", ""}},
+		{"absolute flag", "", []string{"-rev-include", "/images/**"}},
+		{"empty path component", "", []string{"-rev-include", "images//*.css"}},
+		{"duplicate case flag", "", []string{"-rev-include", "**/*.css", "-rev-include", "**/*.CSS"}},
+		{"malformed file", `rev_include = ["**/[foo"]`, nil},
+		{"parent file", `rev_include = ["../images/**"]`, nil},
+		{"duplicate file", `rev_include = ["**/*.js", "**/*.JS"]`, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -536,7 +543,7 @@ func TestCLIRejectsInvalidExtensions(t *testing.T) {
 				writeTestFile(t, filepath.Join(root, "cdnware.toml"), tc.config)
 			}
 			_, output, err := runCLI(t, append(tc.args, root)...)
-			if err == nil || !strings.Contains(output, "rev_ext extension") {
+			if err == nil || !strings.Contains(output, "rev_include pattern") {
 				t.Fatalf("expected extension error, got %v: %s", err, output)
 			}
 		})

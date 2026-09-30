@@ -26,11 +26,12 @@ $ cdnware -cdn https://cdn.example.com/some-path _site
 
 Every file in `_site/assets` is copied to `_site/assets-rev` with an 8-character content hash. Nested directories are preserved. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output.
 
-Use `-rev-ext .css,.js` to revise only those extensions (case-insensitive).
-Excluded files stay in `assets` and do not appear in `assets-rev` or the
-manifest. Site references to them remain unchanged; relative references from
-revisioned assets to excluded files become same-origin `/assets/...` URLs so
-they still resolve after the referring asset moves.
+Use `-rev-include '**/*.css' -rev-include '**/*.js'` to revise only matching
+source-relative paths. Excluded files stay in `assets` and do not appear in
+`assets-rev` or the manifest. Site references to them remain unchanged;
+relative references from revisioned assets to excluded files become
+same-origin `/assets/...` URLs so they still resolve after the referring asset
+moves.
 
 Ex:
 
@@ -93,7 +94,7 @@ All settings can be set via CLI flag or a config file. Precedence is
 | `-cdn` | `""` | CDN base URL |
 | `-src` | `assets` | Source asset directory (relative to SITEROOT) |
 | `-dest` | `assets-rev` | Destination directory for revisioned assets |
-| `-rev-ext` | _all files_ | Comma-separated extensions with leading dots, e.g. `.css,.js`; `-rev-ext ""` revises none |
+| `-rev-include` | _all files_ | Repeatable source-relative glob, e.g. `-rev-include '**/*.css'`; `-rev-include ''` revises none |
 | `-config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
@@ -105,15 +106,15 @@ If `-config` is not given, cdnware looks in SITEROOT then CWD for, in order:
 build time and loaded first. Settings omitted from a site config inherit its
 values, even when `-config -` disables auto-discovery. Edit the example and
 rebuild to change the shipped defaults; use a site config or flags for local
-overrides. The embedded file leaves `rev_ext` unset because the default is to
-revise every file; `rev_ext = []` would instead revise nothing.
+overrides. The embedded file leaves `rev_include` unset because the default
+is to revise every file; `rev_include = []` would instead revise nothing.
 
 ```toml
 # cdnware.toml
 cdn = "https://cdn.example.com/v3"
 src = "assets"
 dest = "assets-rev"
-rev_ext = [".css", ".js"]
+rev_include = ["**/*.css", "**/*.js", "images/logo-*.svg"]
 ```
 
 ```yaml
@@ -121,7 +122,7 @@ rev_ext = [".css", ".js"]
 cdn: https://cdn.example.com/v3
 src: assets
 dest: assets-rev
-rev_ext: [.css, .js]
+rev_include: ["**/*.css", "**/*.js", "images/logo-*.svg"]
 ```
 
 ```json
@@ -129,18 +130,25 @@ rev_ext: [.css, .js]
   "cdn": "https://cdn.example.com/v3",
   "src": "assets",
   "dest": "assets-rev",
-  "rev_ext": [".css", ".js"]
+  "rev_include": ["**/*.css", "**/*.js", "images/logo-*.svg"]
 }
 ```
 
-With the shipped base config, omitting `rev_ext` revises every regular source
-file, including files without an extension. An explicit empty list
-(`rev_ext = []` in TOML, `rev_ext: []` in YAML, or `"rev_ext": []` in JSON)
-revises nothing: the manifest is `{}` and no destination assets are written.
-The CLI equivalent is `-rev-ext ""`.
-Flag selection overrides the file list, including when the flag is empty.
-Extensions must start with `.` and contain only letters and digits; duplicates
-(ignoring case) and malformed entries are errors.
+With the shipped base config, omitting `rev_include` revises every regular
+source file, including files without an extension. An explicit empty list
+(`rev_include = []` in TOML, `rev_include: []` in YAML, or
+`"rev_include": []` in JSON) revises nothing: the manifest is `{}` and no
+destination assets are written. The CLI equivalent is `-rev-include ''`.
+Flag patterns override the file list rather than adding to it.
+This replaces `rev_ext` and `-rev-ext`; migrate existing selections to
+source-relative globs such as `**/*.css`.
+
+Patterns match paths relative to `src`, with `/` separators and case-insensitive
+matching. `*` matches within one path segment, `**` matches zero or more
+directories (so `**/*.css` includes root-level CSS), and `?`, character
+classes, and `{one,two}` alternatives are supported. Quote glob flags to
+prevent shell expansion. Absolute paths, `.` or `..` segments, malformed
+patterns, and duplicates (ignoring case) are errors.
 
 ## Philosophy
 

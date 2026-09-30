@@ -3,6 +3,6 @@ cdn = ""
 src = "assets"
 dest = "assets-rev"
 
-# rev_ext is unset by default: revise every regular file in src.
-# To select types instead, set rev_ext = [".css", ".js"].
-# Setting rev_ext = [] revises nothing.
+# rev_include is unset by default: revise every regular file in src.
+# To select paths instead, set rev_include = ["**/*.css", "images/logo-*.svg"].
+# Setting rev_include = [] revises nothing.
