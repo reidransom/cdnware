@@ -317,24 +317,6 @@ func TestConfigDiscoveryNone(t *testing.T) {
 	}
 }
 
-func TestMergePrecedence(t *testing.T) {
-	cdnFile := "from-file"
-	destFile := "file-rev"
-	fileCfg := &Config{Cdn: &cdnFile, Dest: &destFile}
-	fs := &flagSet{cdn: "from-flag"}
-
-	settings := mergeSettings(".", fileCfg, fs, map[string]bool{"cdn": true})
-	if settings.Cdn != "from-flag" {
-		t.Errorf("flag should win for cdn: got %q", settings.Cdn)
-	}
-	if settings.Dest != "file-rev" {
-		t.Errorf("file should win for dest: got %q", settings.Dest)
-	}
-	if settings.Src != defaultSrc {
-		t.Errorf("default should win for src: got %q", settings.Src)
-	}
-}
-
 func TestLoadSettingsEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "cdnware.toml")
@@ -370,6 +352,59 @@ func runCLI(t *testing.T, args ...string) (map[string]string, string, error) {
 		t.Fatalf("invalid manifest %q: %v", output, err)
 	}
 	return manifest, string(output), nil
+}
+
+func TestCLIUsesEmbeddedConfigAsFallback(t *testing.T) {
+	root := t.TempDir()
+	buildDir := filepath.Join(root, "build")
+	for _, name := range []string{"cdnware.go", "go.mod", "go.sum"} {
+		content, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(buildDir, name), string(content))
+	}
+	writeTestFile(t, filepath.Join(buildDir, "cdnware.example.toml"), `cdn = "https://base.example"
+src = "media"
+dest = "media-rev"
+rev_ext = [".css"]
+`)
+	binary := filepath.Join(root, "cdnware")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = buildDir
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building with changed base config: %v: %s", err, output)
+	}
+
+	site := filepath.Join(root, "site")
+	writeTestFile(t, filepath.Join(site, "media/app.css"), "body {}")
+	writeTestFile(t, filepath.Join(site, "media/icon.png"), "pixels")
+	for _, tc := range []struct {
+		name, config, cdn, asset string
+		flags                    []string
+	}{
+		{"base without user config", "-", "https://base.example", "/media/app.css", nil},
+		{"partial user config", filepath.Join(site, "cdnware.toml"), "https://site.example", "/media/app.css", nil},
+		{"flag overrides base selection", "-", "https://base.example", "/media/icon.png", []string{"-rev-ext", ".png"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.config != "-" {
+				writeTestFile(t, tc.config, `cdn = "https://site.example"`)
+			}
+			args := append([]string{"-config", tc.config}, tc.flags...)
+			output, err := exec.Command(binary, append(args, site)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("running with embedded defaults: %v: %s", err, output)
+			}
+			var manifest map[string]string
+			if err := json.Unmarshal(output, &manifest); err != nil {
+				t.Fatalf("invalid manifest %q: %v", output, err)
+			}
+			if len(manifest) != 1 || !strings.HasPrefix(manifest[tc.asset], tc.cdn+"/media-rev/") {
+				t.Fatalf("embedded selection and overrides: %v", manifest)
+			}
+		})
+	}
 }
 
 func TestCLISelectsExtensionsAndPreservesExcludedReferences(t *testing.T) {

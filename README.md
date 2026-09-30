@@ -84,7 +84,7 @@ $ cat _site/index.html
 ## Configuration
 
 All settings can be set via CLI flag or a config file. Precedence is
-**flag > config file > built-in default**.
+**flag > config file > embedded base config**.
 
 ### Flags
 
@@ -100,6 +100,13 @@ All settings can be set via CLI flag or a config file. Precedence is
 
 If `-config` is not given, cdnware looks in SITEROOT then CWD for, in order:
 `cdnware.toml`, `cdnware.yaml`, `cdnware.yml`, `cdnware.json`. First match wins.
+
+[`cdnware.example.toml`](cdnware.example.toml) is embedded in the binary at
+build time and loaded first. Settings omitted from a site config inherit its
+values, even when `-config -` disables auto-discovery. Edit the example and
+rebuild to change the shipped defaults; use a site config or flags for local
+overrides. The embedded file leaves `rev_ext` unset because the default is to
+revise every file; `rev_ext = []` would instead revise nothing.
 
 ```toml
 # cdnware.toml
@@ -126,10 +133,11 @@ rev_ext: [.css, .js]
 }
 ```
 
-Omit `rev_ext` to revise every regular source file, including files without an
-extension. An explicit empty list (`rev_ext = []` in TOML, `rev_ext: []` in
-YAML, or `"rev_ext": []` in JSON) revises nothing: the manifest is `{}` and
-no destination assets are written. The CLI equivalent is `-rev-ext ""`.
+With the shipped base config, omitting `rev_ext` revises every regular source
+file, including files without an extension. An explicit empty list
+(`rev_ext = []` in TOML, `rev_ext: []` in YAML, or `"rev_ext": []` in JSON)
+revises nothing: the manifest is `{}` and no destination assets are written.
+The CLI equivalent is `-rev-ext ""`.
 Flag selection overrides the file list, including when the flag is empty.
 Extensions must start with `.` and contain only letters and digits; duplicates
 (ignoring case) and malformed entries are errors.

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,11 +19,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	hashLength  = 8
-	defaultSrc  = "assets"
-	defaultDest = "assets-rev"
-)
+const hashLength = 8
+
+//go:embed cdnware.example.toml
+var defaultConfig []byte
 
 // Config holds file-backed settings. Pointer fields distinguish omitted
 // values from explicit empty values.
@@ -371,6 +371,17 @@ func loadConfigFile(path string) (*Config, error) {
 	return cfg, nil
 }
 
+func loadDefaultConfig() (*Config, error) {
+	cfg := &Config{}
+	if err := toml.Unmarshal(defaultConfig, cfg); err != nil {
+		return nil, fmt.Errorf("parsing embedded cdnware.example.toml: %w", err)
+	}
+	if cfg.Cdn == nil || cfg.Src == nil || cfg.Dest == nil {
+		return nil, errors.New("embedded cdnware.example.toml must define cdn, src, and dest")
+	}
+	return cfg, nil
+}
+
 func discoverConfig(siteroot string) string {
 	names := []string{"cdnware.toml", "cdnware.yaml", "cdnware.yml", "cdnware.json"}
 	dirs := []string{siteroot}
@@ -397,12 +408,14 @@ type flagSet struct {
 	configPath string
 }
 
-func mergeSettings(baseDir string, fileCfg *Config, fs *flagSet, explicit map[string]bool) Settings {
+func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, explicit map[string]bool) (Settings, error) {
 	settings := Settings{
 		BaseDir: baseDir,
-		Src:     defaultSrc,
-		Dest:    defaultDest,
+		Cdn:     *defaults.Cdn,
+		Src:     *defaults.Src,
+		Dest:    *defaults.Dest,
 	}
+	revExt := defaults.RevExt
 	if fileCfg != nil {
 		if fileCfg.Cdn != nil {
 			settings.Cdn = *fileCfg.Cdn
@@ -412,6 +425,9 @@ func mergeSettings(baseDir string, fileCfg *Config, fs *flagSet, explicit map[st
 		}
 		if fileCfg.Dest != nil {
 			settings.Dest = *fileCfg.Dest
+		}
+		if fileCfg.RevExt != nil {
+			revExt = fileCfg.RevExt
 		}
 	}
 	if explicit["cdn"] {
@@ -423,7 +439,22 @@ func mergeSettings(baseDir string, fileCfg *Config, fs *flagSet, explicit map[st
 	if explicit["dest"] {
 		settings.Dest = fs.dest
 	}
-	return settings
+	if explicit["rev-ext"] {
+		if fs.revExt == "" {
+			settings.RevExt = map[string]bool{}
+			return settings, nil
+		}
+		entries := strings.Split(fs.revExt, ",")
+		revExt = &entries
+	}
+	if revExt != nil {
+		var err error
+		settings.RevExt, err = parseRevExt(*revExt)
+		if err != nil {
+			return Settings{}, err
+		}
+	}
+	return settings, nil
 }
 
 func parseRevExt(entries []string) (map[string]bool, error) {
@@ -451,10 +482,14 @@ func getUsage() string {
 }
 
 func loadSettings(args []string) (Settings, error) {
+	defaults, err := loadDefaultConfig()
+	if err != nil {
+		return Settings{}, err
+	}
 	fs := &flagSet{fs: flag.NewFlagSet("cdnware", flag.ContinueOnError)}
-	fs.fs.StringVar(&fs.cdn, "cdn", "", "CDN base URL")
-	fs.fs.StringVar(&fs.src, "src", defaultSrc, "source directory for assets, relative to SITEROOT")
-	fs.fs.StringVar(&fs.dest, "dest", defaultDest, "destination directory for revisioned assets, relative to SITEROOT")
+	fs.fs.StringVar(&fs.cdn, "cdn", *defaults.Cdn, "CDN base URL")
+	fs.fs.StringVar(&fs.src, "src", *defaults.Src, "source directory for assets, relative to SITEROOT")
+	fs.fs.StringVar(&fs.dest, "dest", *defaults.Dest, "destination directory for revisioned assets, relative to SITEROOT")
 	fs.fs.StringVar(&fs.revExt, "rev-ext", "", "comma-separated extensions to revise (e.g. .css,.js); empty revises nothing")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
 	fs.fs.Usage = func() {
@@ -476,7 +511,6 @@ func loadSettings(args []string) (Settings, error) {
 	})
 
 	var fileCfg *Config
-	var err error
 	switch fs.configPath {
 	case "":
 		if path := discoverConfig(baseDir); path != "" {
@@ -489,20 +523,7 @@ func loadSettings(args []string) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
-	settings := mergeSettings(baseDir, fileCfg, fs, explicit)
-	if explicit["rev-ext"] {
-		if fs.revExt == "" {
-			settings.RevExt = map[string]bool{}
-		} else {
-			settings.RevExt, err = parseRevExt(strings.Split(fs.revExt, ","))
-		}
-	} else if fileCfg != nil && fileCfg.RevExt != nil {
-		settings.RevExt, err = parseRevExt(*fileCfg.RevExt)
-	}
-	if err != nil {
-		return Settings{}, err
-	}
-	return settings, nil
+	return mergeSettings(baseDir, defaults, fileCfg, fs, explicit)
 }
 
 func main() {

@@ -1,0 +1,8 @@
+# Embedded in the binary at build time; edit and rebuild to change defaults.
+cdn = ""
+src = "assets"
+dest = "assets-rev"
+
+# rev_ext is unset by default: revise every regular file in src.
+# To select types instead, set rev_ext = [".css", ".js"].
+# Setting rev_ext = [] revises nothing.
