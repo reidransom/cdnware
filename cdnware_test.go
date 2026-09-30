@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,7 +128,7 @@ func TestRevRejectsAssetReferenceCycles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "assets/a.js"), `import "./b.js";`)
 	writeTestFile(t, filepath.Join(root, "assets/b.js"), `import "./a.js";`)
 
-	revisioner, err := newRevisioner(root, "", "assets", "assets-rev")
+	revisioner, err := newRevisioner(root, "", "assets", "assets-rev", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +209,7 @@ func TestPublicURL(t *testing.T) {
 
 func TestSourceAndDestinationMustDiffer(t *testing.T) {
 	root := t.TempDir()
-	if _, err := newRevisioner(root, "", "assets", "assets"); err == nil {
+	if _, err := newRevisioner(root, "", "assets", "assets", nil); err == nil {
 		t.Fatal("expected matching source and destination directories to fail")
 	}
 }
@@ -353,5 +355,155 @@ dest = "static-rev"
 	}
 	if settings.Dest != "static-rev" {
 		t.Errorf("dest from file: %q", settings.Dest)
+	}
+}
+
+func runCLI(t *testing.T, args ...string) (map[string]string, string, error) {
+	t.Helper()
+	cmd := exec.Command("go", append([]string{"run", "."}, args...)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, string(output), err
+	}
+	var manifest map[string]string
+	if err := json.Unmarshal(output, &manifest); err != nil {
+		t.Fatalf("invalid manifest %q: %v", output, err)
+	}
+	return manifest, string(output), nil
+}
+
+func TestCLISelectsExtensionsAndPreservesExcludedReferences(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "assets/css/app.CSS"), `@import "./base.css"; background: url("../images/icon.PNG");`)
+	writeTestFile(t, filepath.Join(root, "assets/css/base.css"), `body { color: blue; }`)
+	writeTestFile(t, filepath.Join(root, "assets/js/app.JS"), `const img = "/assets/images/icon.PNG";`)
+	writeTestFile(t, filepath.Join(root, "assets/images/icon.PNG"), "pixels")
+	index := filepath.Join(root, "index.html")
+	writeTestFile(t, index, `<link href="/assets/css/app.CSS"><script src="/assets/js/app.JS"></script><img src="/assets/images/icon.PNG">`)
+
+	manifest, output, err := runCLI(t, "-config", "-", "-cdn", "https://cdn.example.com", "-rev-ext", ".css,.js", root)
+	if err != nil {
+		t.Fatalf("cdnware: %v: %s", err, output)
+	}
+	if len(manifest) != 3 || manifest["/assets/css/app.CSS"] == "" || manifest["/assets/css/base.css"] == "" || manifest["/assets/js/app.JS"] == "" {
+		t.Fatalf("selected manifest = %v", manifest)
+	}
+	if _, ok := manifest["/assets/images/icon.PNG"]; ok {
+		t.Fatalf("excluded PNG in manifest: %v", manifest)
+	}
+	cssPath := filepath.Join(root, strings.TrimPrefix(manifest["/assets/css/app.CSS"], "https://cdn.example.com/"))
+	css, err := os.ReadFile(cssPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), manifest["/assets/css/base.css"]) || !strings.Contains(string(css), `url("/assets/images/icon.PNG")`) {
+		t.Fatalf("revisioned CSS references = %q", css)
+	}
+	assertFilenameMatchesContent(t, cssPath)
+	jsPath := filepath.Join(root, strings.TrimPrefix(manifest["/assets/js/app.JS"], "https://cdn.example.com/"))
+	js, err := os.ReadFile(jsPath)
+	if err != nil || string(js) != `const img = "/assets/images/icon.PNG";` {
+		t.Fatalf("revisioned JS = %q, %v", js, err)
+	}
+	site, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(site), manifest["/assets/css/app.CSS"]) || !strings.Contains(string(site), manifest["/assets/js/app.JS"]) || !strings.Contains(string(site), `/assets/images/icon.PNG`) {
+		t.Fatalf("site references = %q", site)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "assets-rev/images"))
+	if !os.IsNotExist(err) || len(entries) != 0 {
+		t.Fatalf("excluded PNG was emitted: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestCLIConfigSelectionsAndPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+	}{
+		{"toml", `rev_ext = [".PNG"]`},
+		{"yaml", "rev_ext:\n  - .PNG\n"},
+		{"json", `{"rev_ext":[".PNG"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "assets/app.css"), "body {}")
+			writeTestFile(t, filepath.Join(root, "assets/pic.PNG"), "pixels")
+			writeTestFile(t, filepath.Join(root, "cdnware."+tc.name), tc.config)
+			manifest, output, err := runCLI(t, root)
+			if err != nil {
+				t.Fatalf("config run: %v: %s", err, output)
+			}
+			if len(manifest) != 1 || manifest["/assets/pic.PNG"] == "" {
+				t.Fatalf("file selection = %v", manifest)
+			}
+			manifest, output, err = runCLI(t, "-rev-ext", ".CSS", root)
+			if err != nil {
+				t.Fatalf("flag run: %v: %s", err, output)
+			}
+			if len(manifest) != 1 || manifest["/assets/app.css"] == "" {
+				t.Fatalf("flag selection = %v", manifest)
+			}
+		})
+	}
+}
+
+func TestCLIExplicitEmptySelection(t *testing.T) {
+	for _, tc := range []struct {
+		name, filename, config string
+		args                   []string
+	}{
+		{"toml", "cdnware.toml", `rev_ext = []`, nil},
+		{"yaml", "cdnware.yml", `rev_ext: []`, nil},
+		{"json", "cdnware.json", `{"rev_ext":[]}`, nil},
+		{"flag overrides file", "cdnware.toml", `rev_ext = [".css"]`, []string{"-rev-ext", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, tc.filename), tc.config)
+			writeTestFile(t, filepath.Join(root, "assets/app.css"), "body {}")
+			writeTestFile(t, filepath.Join(root, "assets/pic.png"), "pixels")
+			writeTestFile(t, filepath.Join(root, "assets-rev/stale.css"), "stale")
+			index := filepath.Join(root, "index.html")
+			original := `<link href="/assets/app.css"><img src="/assets/pic.png">`
+			writeTestFile(t, index, original)
+			manifest, output, err := runCLI(t, append(tc.args, root)...)
+			if err != nil || len(manifest) != 0 {
+				t.Fatalf("empty selection: manifest=%v err=%v output=%s", manifest, err, output)
+			}
+			if _, err := os.Stat(filepath.Join(root, "assets-rev")); !os.IsNotExist(err) {
+				t.Fatalf("destination remains: %v", err)
+			}
+			site, err := os.ReadFile(index)
+			if err != nil || string(site) != original {
+				t.Fatalf("site = %q, err=%v", site, err)
+			}
+		})
+	}
+}
+
+func TestCLIRejectsInvalidExtensions(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		args         []string
+	}{
+		{"missing dot flag", "", []string{"-rev-ext", "css"}},
+		{"empty entry flag", "", []string{"-rev-ext", ".css,"}},
+		{"duplicate case flag", "", []string{"-rev-ext", ".css,.CSS"}},
+		{"malformed file", `rev_ext = [".css", "../js"]`, nil},
+		{"duplicate file", `rev_ext = [".js", ".JS"]`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "assets/app.css"), "body {}")
+			if tc.config != "" {
+				writeTestFile(t, filepath.Join(root, "cdnware.toml"), tc.config)
+			}
+			_, output, err := runCLI(t, append(tc.args, root)...)
+			if err == nil || !strings.Contains(output, "rev_ext extension") {
+				t.Fatalf("expected extension error, got %v: %s", err, output)
+			}
+		})
 	}
 }

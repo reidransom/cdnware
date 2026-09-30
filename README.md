@@ -26,6 +26,12 @@ $ cdnware -cdn https://cdn.example.com/some-path _site
 
 Every file in `_site/assets` is copied to `_site/assets-rev` with an 8-character content hash. Nested directories are preserved. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output.
 
+Use `-rev-ext .css,.js` to revise only those extensions (case-insensitive).
+Excluded files stay in `assets` and do not appear in `assets-rev` or the
+manifest. Site references to them remain unchanged; relative references from
+revisioned assets to excluded files become same-origin `/assets/...` URLs so
+they still resolve after the referring asset moves.
+
 Ex:
 
 ```
@@ -87,6 +93,7 @@ All settings can be set via CLI flag or a config file. Precedence is
 | `-cdn` | `""` | CDN base URL |
 | `-src` | `assets` | Source asset directory (relative to SITEROOT) |
 | `-dest` | `assets-rev` | Destination directory for revisioned assets |
+| `-rev-ext` | _all files_ | Comma-separated extensions with leading dots, e.g. `.css,.js`; `-rev-ext ""` revises none |
 | `-config` | _auto_ | Path to config file; use `-` to disable auto-discovery |
 
 ### Config file
@@ -99,6 +106,7 @@ If `-config` is not given, cdnware looks in SITEROOT then CWD for, in order:
 cdn = "https://cdn.example.com/v3"
 src = "assets"
 dest = "assets-rev"
+rev_ext = [".css", ".js"]
 ```
 
 ```yaml
@@ -106,15 +114,25 @@ dest = "assets-rev"
 cdn: https://cdn.example.com/v3
 src: assets
 dest: assets-rev
+rev_ext: [.css, .js]
 ```
 
 ```json
 {
   "cdn": "https://cdn.example.com/v3",
   "src": "assets",
-  "dest": "assets-rev"
+  "dest": "assets-rev",
+  "rev_ext": [".css", ".js"]
 }
 ```
+
+Omit `rev_ext` to revise every regular source file, including files without an
+extension. An explicit empty list (`rev_ext = []` in TOML, `rev_ext: []` in
+YAML, or `"rev_ext": []` in JSON) revises nothing: the manifest is `{}` and
+no destination assets are written. The CLI equivalent is `-rev-ext ""`.
+Flag selection overrides the file list, including when the flag is empty.
+Extensions must start with `.` and contain only letters and digits; duplicates
+(ignoring case) and malformed entries are errors.
 
 ## Philosophy
 
