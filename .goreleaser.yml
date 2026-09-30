@@ -1,6 +1,8 @@
+version: 2
+
 project_name: cdnware
 builds:
-  - main: ./cdnware.go
+  - main: .
     binary: cdnware
     goos:
       - linux
@@ -10,8 +12,8 @@ builds:
       - amd64
       - arm64
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
 checksum:
   name_template: "checksums.txt"
 changelog:
-  skip: true
+  disable: true

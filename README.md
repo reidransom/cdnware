@@ -5,7 +5,7 @@ for deploy to a CDN (or anywhere else) with version mapping.
 
 ## Install
 
-<!-- Pre-built binaries are distributed in [releases](https://github.com/reidransom/cdnware/releases). -->
+Pre-built binaries are available in [releases](https://github.com/reidransom/cdnware/releases).
 
 You can build from source,
 
