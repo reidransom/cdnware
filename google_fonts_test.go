@@ -37,7 +37,7 @@ func TestGoogleFontsSelfHostingAndManagedLifecycle(t *testing.T) {
 /* greek */ @font-face { font-family: 'Demo'; font-style: italic; font-weight: 700; font-display: swap; src: url(https://fonts.gstatic.com/s/demo/greek.woff2) format('woff2'); unicode-range: U+0370-03FF; }`)
 		case r.Host == "fonts.gstatic.com" && strings.HasSuffix(r.URL.Path, ".woff2"):
 			w.Header().Set("Content-Type", "font/woff2")
-			fmt.Fprint(w, r.URL.Path)
+			fmt.Fprint(w, "wOF2"+r.URL.Path)
 		default:
 			http.NotFound(w, r)
 		}
@@ -120,6 +120,61 @@ func TestGoogleFontsSelfHostingAndManagedLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(styleSource, "/")))); !os.IsNotExist(err) || readTestFile(t, unrelated) != "body {}" {
 		t.Fatalf("stale Google resource survived or unrelated library file changed: %v", err)
+	}
+}
+
+func TestGoogleFontsRequiresWOFF2(t *testing.T) {
+	for _, tc := range []struct {
+		name, css, font, want string
+	}{
+		{"browser variant", "", "wOF2font", ""},
+		{"legacy stylesheet", `@font-face { src: url(https://fonts.gstatic.com/demo.ttf) format('truetype'); }`, "ttf", "WOFF2"},
+		{"invalid binary", "", "not a font", "WOFF2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Host == "fonts.googleapis.com" {
+					w.Header().Set("Content-Type", "text/css")
+					if tc.css != "" {
+						fmt.Fprint(w, tc.css)
+					} else if strings.Contains(r.UserAgent(), "Chrome/") {
+						fmt.Fprint(w, `@font-face { src: url(https://fonts.gstatic.com/demo.woff2) format('woff2'); }`)
+					} else {
+						fmt.Fprint(w, `@font-face { src: url(https://fonts.gstatic.com/demo.ttf) format('truetype'); }`)
+					}
+					return
+				}
+				w.Header().Set("Content-Type", "font/woff2")
+				fmt.Fprint(w, tc.font)
+			}))
+			defer server.Close()
+			root := t.TempDir()
+			style := "https://fonts.googleapis.com/css2?family=Demo"
+			page := `<link rel="stylesheet" href="` + style + `">`
+			writeTestFile(t, filepath.Join(root, "index.html"), page)
+			settings, err := loadSettings([]string{"-config", "-", "-google-fonts", root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := run(settings, googleTestClient(server))
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "fonts.") {
+					t.Fatalf("expected URL-specific %s error, got %v", tc.want, err)
+				}
+				if got := readTestFile(t, filepath.Join(root, "index.html")); got != page {
+					t.Fatalf("page changed after invalid font: %s", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			font := "https://fonts.gstatic.com/demo.woff2"
+			css := readTestFile(t, destinationPath(t, root, manifest[style]))
+			if !strings.Contains(css, manifest[font]) || !strings.Contains(css, "format('woff2')") || strings.Contains(css, ".ttf") {
+				t.Fatalf("staged CSS is not the browser WOFF2 variant: %s", css)
+			}
+		})
 	}
 }
 
@@ -248,10 +303,10 @@ func TestGoogleFontsOptInAfterAllowlistedStylesheet(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host == "fonts.googleapis.com" {
 			w.Header().Set("Content-Type", "text/css")
-			fmt.Fprint(w, `@font-face {font-family: Demo; src: url(https://fonts.gstatic.com/a.woff2);}`)
+			fmt.Fprint(w, `@font-face {font-family: Demo; src: url(https://fonts.gstatic.com/a.woff2) format('woff2');}`)
 		} else {
 			w.Header().Set("Content-Type", "font/woff2")
-			fmt.Fprint(w, "font")
+			fmt.Fprint(w, "wOF2font")
 		}
 	}))
 	defer server.Close()
@@ -292,11 +347,11 @@ func TestGoogleFontsRetainsPreconnectWhenCSSIsNotLocalized(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host == "fonts.gstatic.com" {
 			w.Header().Set("Content-Type", "font/woff2")
-			fmt.Fprint(w, "font")
+			fmt.Fprint(w, "wOF2font")
 			return
 		}
 		w.Header().Set("Content-Type", "text/css")
-		fmt.Fprint(w, `@font-face { src: url(https://fonts.gstatic.com/a.woff2); }`)
+		fmt.Fprint(w, `@font-face { src: url(https://fonts.gstatic.com/a.woff2) format('woff2'); }`)
 	}))
 	defer server.Close()
 	for _, tc := range []struct {

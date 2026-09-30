@@ -235,10 +235,12 @@ referenced font are saved in `assets/lib/.cdnware/` (or `<src>/lib/.cdnware/`),
 revisioned under `<dest>/lib/.cdnware/`, and mapped from their original HTTPS
 URLs to their final same-origin or `--cdn` URLs in the JSON manifest. Font-face
 rules and unicode ranges come from Google's CSS response; only URL references
-are changed. Google Fonts responses may vary with the request's user agent:
-the emitted CSS contains exactly the variants provided at build time, not
-synthetic fallbacks for other clients. Check browser compatibility against the
-build environment before deploying.
+are changed. cdnware requests Google stylesheets with a Chrome-compatible user
+agent to obtain WOFF2 variants, rejects stylesheets referencing non-WOFF2 font
+URLs, and checks downloaded font files for the WOFF2 signature before changing
+site references. The emitted CSS contains exactly the variants Google provides
+for that request; it does not synthesize fallbacks for browsers without WOFF2
+support.
 
 Google Fonts-only preconnect hints are removed from localized HTML unless the
 page still contains a Google Fonts origin reference or custom asset selection

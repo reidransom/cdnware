@@ -26,6 +26,8 @@ const (
 	maxExternalBytes = 16 << 20
 	maxExternalFiles = 128
 	externalTimeout  = 15 * time.Second
+	// Google Fonts selects font formats from the stylesheet request's user agent.
+	googleFontsUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 type managedAsset struct {
@@ -460,6 +462,9 @@ func (e *externalAssets) fetch(raw string, css bool, role downloadRole) error {
 	if err != nil {
 		return fmt.Errorf("fetching %s: %w", raw, err)
 	}
+	if role == googleStylesheet {
+		request.Header.Set("User-Agent", googleFontsUserAgent)
+	}
 	response, err := e.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("fetching %s: %w", raw, err)
@@ -483,6 +488,9 @@ func (e *externalAssets) fetch(raw string, css bool, role downloadRole) error {
 	}
 	if role == googleFont && (len(content) == 0 || strings.HasPrefix(response.Header.Get("Content-Type"), "text/html")) {
 		return fmt.Errorf("fetching %s: invalid font response", raw)
+	}
+	if role == googleFont && !bytes.HasPrefix(content, []byte("wOF2")) {
+		return fmt.Errorf("fetching %s: expected WOFF2 font", raw)
 	}
 	e.payload[raw] = content
 	e.active[raw] = managedAsset{Source: e.source(raw), Digest: digest(content), Base: response.Request.URL.String()}
@@ -509,7 +517,8 @@ func (e *externalAssets) fetchCSS(raw string, base *url.URL, content []byte) err
 				expected = googleStylesheet
 			}
 			u, err := url.Parse(strings.TrimSpace(value))
-			if err != nil || resolved == "" || e.role(base.ResolveReference(u), base, imported) != expected {
+			if err != nil || resolved == "" || e.role(base.ResolveReference(u), base, imported) != expected ||
+				!imported && !strings.EqualFold(filepath.Ext(u.Path), ".woff2") {
 				invalid = value
 			} else if !imported {
 				fonts++
@@ -524,7 +533,7 @@ func (e *externalAssets) fetchCSS(raw string, base *url.URL, content []byte) err
 		return value
 	})
 	if google && (invalid != "" || fonts == 0 || !bytes.Contains(bytes.ToLower(content), []byte("@font-face"))) {
-		return fmt.Errorf("fetching %s: invalid Google Fonts stylesheet (font URL %q)", raw, invalid)
+		return fmt.Errorf("fetching %s: invalid Google Fonts stylesheet (expected WOFF2 font URLs; invalid URL %q)", raw, invalid)
 	}
 	entry.Dependencies = order
 	e.active[raw] = entry
