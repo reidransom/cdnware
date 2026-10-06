@@ -122,6 +122,66 @@ func TestExternalAssetsResolveAndReviseCSSGraph(t *testing.T) {
 	}
 }
 
+func TestCLIMigratesRetainedNestedAssetURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		remote  string
+		content string
+		args    []string
+	}{
+		{name: "external script", remote: "https://origin.example.com/app.js", content: "console.log('managed');", args: []string{"-external-hosts", "origin.example.com"}},
+		{name: "Google stylesheet", remote: "https://fonts.googleapis.com/css2?family=Demo", content: "body { color: blue; }", args: []string{"-google-fonts"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			name := googleManagedName(tc.remote)
+			sourceURL := "/static/lib/.cdnware/" + name
+			writeTestFile(t, filepath.Join(root, strings.TrimPrefix(sourceURL, "/")), tc.content)
+			oldName := strings.TrimSuffix(name, filepath.Ext(name)) + ".12345678" + filepath.Ext(name)
+			oldFinal := "https://cdn.example.com/public/lib/.cdnware/" + oldName
+			writeTestFile(t, filepath.Join(root, "public/lib/.cdnware", oldName), "old output")
+			state := map[string]managedAsset{
+				tc.remote: {Source: sourceURL, Final: oldFinal, Digest: digest([]byte(tc.content))},
+			}
+			data, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(root, "static/lib/.cdnware/state.json"), string(data))
+			page := `<script src="` + oldFinal + `"></script>`
+			if strings.HasSuffix(name, ".css") {
+				page = `<link rel="stylesheet" href="` + oldFinal + `">`
+			}
+			writeTestFile(t, filepath.Join(root, "index.html"), page)
+			writeTestFile(t, filepath.Join(root, "site.css"), `@import "`+oldFinal+`";`)
+
+			args := append([]string{"-config", "-", "-src", "static", "-dest", "public", "-cdn", "https://cdn.example.com"}, tc.args...)
+			manifest, output, err := runCLI(t, append(args, root)...)
+			if err != nil {
+				t.Fatalf("retained asset migration failed: %v: %s", err, output)
+			}
+			final := manifest[tc.remote]
+			if final == "" || manifest[sourceURL] != final {
+				t.Fatalf("retained asset mappings = %v", manifest)
+			}
+			path := destinationPath(t, root, strings.TrimPrefix(final, "https://cdn.example.com"))
+			if filepath.Dir(path) != filepath.Join(root, "public") {
+				t.Fatalf("retained asset destination was not flattened: %s", path)
+			}
+			assertFilenameMatchesContent(t, path)
+			for _, file := range []string{"index.html", "site.css"} {
+				got := readTestFile(t, filepath.Join(root, file))
+				if strings.Contains(got, oldFinal) || !strings.Contains(got, final) {
+					t.Fatalf("%s retained a removed nested destination: %s", file, got)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(root, "public/lib/.cdnware", oldName)); !os.IsNotExist(err) {
+				t.Fatalf("old nested destination survived: %v", err)
+			}
+		})
+	}
+}
+
 func TestExternalAssetsUseRedirectedCSSBaseAndCustomDirectories(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

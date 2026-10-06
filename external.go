@@ -754,7 +754,7 @@ func (e *externalAssets) finish(manifest map[string]string) error {
 		} else {
 			entry.Final = entry.Source // Normal rev_include/rev_exclude selection.
 		}
-		if old, ok := e.previous[raw]; e.googleStyles && ok && strings.HasSuffix(old.Final, ".bin") && strings.HasSuffix(entry.Final, ".css") {
+		if old, ok := e.previous[raw]; ok && old.Final != entry.Final {
 			if previousFinals == nil {
 				previousFinals = make(map[string]string)
 			}

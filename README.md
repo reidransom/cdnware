@@ -205,7 +205,9 @@ includes `https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js` mapped
 to that final URL, as well as the local `/assets/lib/.cdnware/...` source key.
 The managed source files and their bookkeeping live under `assets/lib/.cdnware/`;
 leave that directory intact between runs. Re-running against an already rewritten
-site retains referenced managed files; regenerating the site prunes unused ones.
+site retains referenced managed files and updates their links to current flat
+destinations, including links from older nested-output runs; regenerating the
+site prunes unused ones.
 Unrelated files elsewhere in `assets/lib/` are untouched.
 
 Only HTTPS resources on exact listed hostnames qualify. The HTML scanner covers
