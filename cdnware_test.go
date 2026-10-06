@@ -63,7 +63,7 @@ func TestHashFile(t *testing.T) {
 	}
 }
 
-func TestRevPreservesNestedPathsAndRevisionsEveryFile(t *testing.T) {
+func TestRevFlattensNestedPathsAndRevisionsEveryFile(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "assets/images/patrons/person.webp"), "patron")
 	writeTestFile(t, filepath.Join(root, "assets/images/team/person.webp"), "team")
@@ -80,11 +80,11 @@ func TestRevPreservesNestedPathsAndRevisionsEveryFile(t *testing.T) {
 	if patronURL == teamURL {
 		t.Fatalf("same basenames in different directories collided at %s", patronURL)
 	}
-	if !strings.HasPrefix(patronURL, "/assets-rev/images/patrons/person.") {
-		t.Fatalf("patron URL did not preserve directories: %s", patronURL)
+	if !strings.HasPrefix(patronURL, "/assets-rev/person.") {
+		t.Fatalf("patron URL was not flattened: %s", patronURL)
 	}
-	if !strings.HasPrefix(teamURL, "/assets-rev/images/team/person.") {
-		t.Fatalf("team URL did not preserve directories: %s", teamURL)
+	if !strings.HasPrefix(teamURL, "/assets-rev/person.") {
+		t.Fatalf("team URL was not flattened: %s", teamURL)
 	}
 	if !strings.HasSuffix(manifest["/assets/js/runtime.wasm"], ".wasm") {
 		t.Fatal("wasm asset was not revisioned")
@@ -94,6 +94,9 @@ func TestRevPreservesNestedPathsAndRevisionsEveryFile(t *testing.T) {
 	}
 
 	for _, url := range manifest {
+		if filepath.Dir(url) != "/assets-rev" {
+			t.Fatalf("asset URL was not flattened: %s", url)
+		}
 		assertFilenameMatchesContent(t, destinationPath(t, root, url))
 	}
 }
@@ -121,6 +124,59 @@ const wasm = "/assets/js/lib/runtime.wasm";
 		t.Fatalf("absolute dependency was not rewritten: %s", app)
 	}
 	assertFilenameMatchesContent(t, appPath)
+}
+
+func TestCLIHandlesFlatDestinationCollisions(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		first       string
+		second      string
+		wantFailure bool
+	}{
+		{name: "identical content", first: "same bytes", second: "same bytes"},
+		// These different payloads share the 8-character MD5 prefix 94141742.
+		{name: "truncated hash collision", first: "collision-83147", second: "collision-143822", wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "assets/a/shared.bin"), tc.first)
+			writeTestFile(t, filepath.Join(root, "assets/b/shared.bin"), tc.second)
+			page := `<a href="/assets/a/shared.bin">first</a><a href="/assets/b/shared.bin">second</a>`
+			index := filepath.Join(root, "index.html")
+			writeTestFile(t, index, page)
+
+			manifest, output, err := runCLI(t, "-config", "-", root)
+			if tc.wantFailure {
+				if err == nil || !strings.Contains(output, "conflicting flat destination") {
+					t.Fatalf("expected flat destination collision error: err=%v output=%s", err, output)
+				}
+				if got := readTestFile(t, filepath.Join(root, "assets-rev/shared.94141742.bin")); got != tc.first {
+					t.Fatalf("collision overwrote first asset: %q", got)
+				}
+				if got := readTestFile(t, index); got != page {
+					t.Fatalf("failed revisioning rewrote site references: %s", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("identical assets failed: %v: %s", err, output)
+			}
+			firstURL, secondURL := manifest["/assets/a/shared.bin"], manifest["/assets/b/shared.bin"]
+			if firstURL == "" || firstURL != secondURL {
+				t.Fatalf("identical assets did not share a destination: %v", manifest)
+			}
+			if got := readTestFile(t, destinationPath(t, root, firstURL)); got != tc.first {
+				t.Fatalf("shared destination content = %q", got)
+			}
+			if got := readTestFile(t, index); got != strings.ReplaceAll(strings.ReplaceAll(page, "/assets/a/shared.bin", firstURL), "/assets/b/shared.bin", secondURL) {
+				t.Fatalf("shared destination references = %s", got)
+			}
+			entries, err := os.ReadDir(filepath.Join(root, "assets-rev"))
+			if err != nil || len(entries) != 1 || entries[0].IsDir() {
+				t.Fatalf("expected one shared flat file: entries=%v err=%v", entries, err)
+			}
+		})
+	}
 }
 
 func TestRevRejectsAssetReferenceCycles(t *testing.T) {
@@ -474,9 +530,17 @@ func TestCLISelectsAssetGlobsAndPreservesExcludedReferences(t *testing.T) {
 	if !strings.Contains(string(site), manifest["/assets/css/app.CSS"]) || !strings.Contains(string(site), manifest["/assets/js/app.JS"]) || !strings.Contains(string(site), `/assets/images/icon.PNG`) {
 		t.Fatalf("site references = %q", site)
 	}
-	entries, err := os.ReadDir(filepath.Join(root, "assets-rev/images"))
-	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "logo-mark.") {
-		t.Fatalf("nonmatching assets were emitted: entries=%v err=%v", entries, err)
+	entries, err := os.ReadDir(filepath.Join(root, "assets-rev"))
+	if err != nil || len(entries) != 4 {
+		t.Fatalf("unexpected destination inventory: entries=%v err=%v", entries, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			t.Fatalf("destination contains a subdirectory: %s", entry.Name())
+		}
+		if !strings.HasPrefix(entry.Name(), "app.") && !strings.HasPrefix(entry.Name(), "base.") && !strings.HasPrefix(entry.Name(), "logo-mark.") {
+			t.Fatalf("nonmatching asset was emitted: %s", entry.Name())
+		}
 	}
 }
 

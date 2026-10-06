@@ -106,6 +106,7 @@ func check(err error) {
 }
 
 func revisionedName(rel, hash string) string {
+	rel = filepath.Base(rel)
 	ext := filepath.Ext(rel)
 	stem := strings.TrimSuffix(rel, ext)
 	if ext == "" {
@@ -355,8 +356,22 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return "", fmt.Errorf("creating destination directory: %w", err)
 	}
-	if err := os.WriteFile(destPath, content, current.mode.Perm()); err != nil {
-		return "", fmt.Errorf("writing %s: %w", destPath, err)
+	file, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, current.mode.Perm())
+	if errors.Is(err, fs.ErrExist) {
+		existing, err := os.ReadFile(destPath)
+		if err != nil {
+			return "", fmt.Errorf("reading existing destination %s: %w", destPath, err)
+		}
+		if !bytes.Equal(existing, content) {
+			return "", fmt.Errorf("conflicting flat destination %s for %s", destPath, sourceURL)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("creating %s: %w", destPath, err)
+	} else {
+		_, writeErr := file.Write(content)
+		if err := errors.Join(writeErr, file.Close()); err != nil {
+			return "", fmt.Errorf("writing %s: %w", destPath, err)
+		}
 	}
 
 	url := publicURL(r.cdn, filepath.Join(r.destDir, destRel))

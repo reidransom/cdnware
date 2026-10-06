@@ -69,7 +69,7 @@ func TestExternalAssetsResolveAndReviseCSSGraph(t *testing.T) {
 	}
 	for _, remote := range []string{js, css, icon, server.URL + "/icon.svg?v=2", server.URL + "/nested.css?v=1", server.URL + "/font.woff?v=1"} {
 		final := manifest[remote]
-		if !strings.HasPrefix(final, settings.Cdn+"/assets-rev/lib/.cdnware/") {
+		if !strings.HasPrefix(final, settings.Cdn+"/assets-rev/") || strings.Contains(strings.TrimPrefix(final, settings.Cdn+"/assets-rev/"), "/") {
 			t.Fatalf("%s mapped to %q", remote, final)
 		}
 		local := strings.TrimPrefix(final, settings.Cdn)
@@ -149,7 +149,7 @@ func TestExternalAssetsUseRedirectedCSSBaseAndCustomDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := manifest[remote]
-	if !strings.HasPrefix(final, "/public/lib/.cdnware/") {
+	if !strings.HasPrefix(final, "/public/") || strings.Contains(strings.TrimPrefix(final, "/public/"), "/") {
 		t.Fatalf("unexpected custom destination %q", final)
 	}
 	content := readTestFile(t, destinationPath(t, root, final))
@@ -280,7 +280,7 @@ func TestCLIExternalHostDownloadsIntoManifest(t *testing.T) {
 		t.Fatalf("invalid CLI manifest: %s: %v", output, err)
 	}
 	final := manifest[remote]
-	if !strings.HasPrefix(final, "/assets-rev/lib/.cdnware/") || !strings.Contains(readTestFile(t, filepath.Join(root, "index.html")), final) {
+	if !strings.HasPrefix(final, "/assets-rev/") || strings.Contains(strings.TrimPrefix(final, "/assets-rev/"), "/") || !strings.Contains(readTestFile(t, filepath.Join(root, "index.html")), final) {
 		t.Fatalf("CLI did not publish downloaded asset: %s, %s", final, readTestFile(t, filepath.Join(root, "index.html")))
 	}
 	assertFilenameMatchesContent(t, destinationPath(t, root, final))

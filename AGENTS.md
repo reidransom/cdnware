@@ -34,8 +34,9 @@ Single-file application (`cdnware.go`) with this flow:
    - Rewrites absolute and relative asset-to-asset references before hashing
    - Rejects reference cycles because cyclic content-addressed filenames are not stable
    - Creates an 8-character MD5 content hash
-   - Preserves source directories under `<baseDir>/assets-rev/`
+   - Flattens source directories into `<baseDir>/assets-rev/`; manifest keys retain source paths
    - Removes stale destination output before each run
+   - Shares identical bytes at a flat revisioned filename; rejects conflicting bytes rather than overwriting
 
 3. **Reference replacement** (`useman()` → `repFile()`):
    - Walks `<baseDir>` for textual site files, excluding `assets/` and `assets-rev/`

@@ -24,7 +24,7 @@ Suppose you built your jekyll site to the standard `_site` folder.
 $ cdnware --cdn https://cdn.example.com/some-path _site
 ```
 
-Every file in `_site/assets` is copied to `_site/assets-rev` with an 8-character content hash. Nested directories are preserved. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output.
+Every file in `_site/assets` is copied directly into `_site/assets-rev` with an 8-character content hash, flattening nested source directories. Manifest keys retain their original source paths. References in the generated site and between textual assets are rewritten before hashing, including responsive-image `srcset` URLs and relative JavaScript imports. The source assets remain unchanged, and a JSON manifest is printed to standard output. Assets with the same basename and identical rewritten bytes share an output file; conflicting bytes at the same revisioned filename fail the command rather than overwrite it.
 
 If the site has no `assets` directory (or no configured `src` directory),
 cdnware prints an empty `{}` manifest. No destination directory is created
@@ -200,7 +200,7 @@ cdnware --cdn https://cdn.example.com --external-hosts cdn.jsdelivr.net _site
 
 If `_site/index.html` has a `<script src="https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js">`,
 cdnware downloads it before revisioning, then rewrites `src` to its content-hashed
-URL under `https://cdn.example.com/assets-rev/lib/.cdnware/`. The JSON manifest
+URL directly under `https://cdn.example.com/assets-rev/`. The JSON manifest
 includes `https://cdn.jsdelivr.net/npm/jquery@3.6.4/dist/jquery.min.js` mapped
 to that final URL, as well as the local `/assets/lib/.cdnware/...` source key.
 The managed source files and their bookkeeping live under `assets/lib/.cdnware/`;
@@ -236,7 +236,7 @@ unrelated external resources.
 Generated HTML stylesheet links and `@import` in generated and local CSS
 qualify, including CSS2 family/variant query strings. The stylesheet and every
 referenced font are saved in `assets/lib/.cdnware/` (or `<src>/lib/.cdnware/`),
-revisioned under `<dest>/lib/.cdnware/`, and mapped from their original HTTPS
+revisioned directly under `<dest>/`, and mapped from their original HTTPS
 URLs to their final same-origin or `--cdn` URLs in the JSON manifest. Font-face
 rules and unicode ranges come from Google's CSS response; only URL references
 are changed. cdnware requests Google stylesheets with a Chrome-compatible user

@@ -66,7 +66,7 @@ func TestGoogleFontsSelfHostingAndManagedLifecycle(t *testing.T) {
 	styleSource := ""
 	for _, remote := range []string{style, alternate, font1, font2} {
 		final := manifest[remote]
-		if !strings.HasPrefix(final, settings.Cdn+"/public/lib/.cdnware/") {
+		if !strings.HasPrefix(final, settings.Cdn+"/public/") || strings.Contains(strings.TrimPrefix(final, settings.Cdn+"/public/"), "/") {
 			t.Fatalf("%s mapped to %q", remote, final)
 		}
 		assertFilenameMatchesContent(t, destinationPath(t, root, strings.TrimPrefix(final, settings.Cdn)))
