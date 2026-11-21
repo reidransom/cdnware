@@ -109,3 +109,11 @@ This opt-in test needs the other tool's binary, not credentials or services.
 It compares actual generated references and final files with Takeoff core's
 inventory for isolated dev/prod policies; normal standalone suites need no
 cross-repository tool installation.
+
+The matching Dash checkout's `scripts/test_prepared_publication.sh` adds an
+actual Jigyll → cdnware → Takeoff → Dash/Caddy browser proof. Set `CDNWARE_BIN`
+to this repository's built executable. Its temporary shared project uses local
+trusted TLS asset URLs, isolated dev/prod outputs and synthetic credentials;
+preparation runs with no network or tokens. The loopback-only harness measures
+browser asset GETs separately from deployment traffic and deliberately proves
+that wrong existing provider bytes are accepted by publication.
