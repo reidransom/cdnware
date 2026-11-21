@@ -46,7 +46,9 @@ Single-file application (`cdnware.go`) with this flow:
 
 ### Configuration
 
-`cdn`, `src`, and `dest` can be set via CLI flags or a `cdnware.{toml,yaml,yml,json}` config file auto-discovered in SITEROOT or CWD. Precedence: flag > file > default. Use `-config <path>` to point at a specific file, or `-config -` to disable auto-discovery.
+Shared `[cdnware]` and `[takeoff.<target>]` settings in `CWD/project.toml` select offline integrated preparation. Use `--target dev` to select an environment, or `--project PATH` for deterministic selection from another directory. Target directories resolve relative to that project; no tokens or policy lookup are involved. See `USAGE.md` for schema, precedence, and the preparation/deployment boundary.
+
+Standalone `cdn`, `src`, and `dest` retain CLI/file defaults and `cdnware.{toml,yaml,yml,json}` discovery in SITEROOT then CWD. Explicit `--config PATH` selects standalone behavior; `--config -` disables all discovery. Precedence remains flag > selected file > default.
 
 ### Asset handling
 

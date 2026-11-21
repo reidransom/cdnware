@@ -43,6 +43,7 @@ type Config struct {
 type Settings struct {
 	BaseDir           string
 	Cdn               string
+	Namespace         *Namespace
 	Src               string
 	Dest              string
 	RevInclude        []string
@@ -65,6 +66,7 @@ type revisioner struct {
 	destDir           string
 	cdn               string
 	assets            map[string]asset
+	assetPrefix       string
 	excluded          map[string]string
 	state             map[string]uint8
 	result            map[string]string
@@ -375,6 +377,9 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 	}
 
 	url := publicURL(r.cdn, filepath.Join(r.destDir, destRel))
+	if r.assetPrefix != "" {
+		url = publicURL(r.cdn, r.assetPrefix+destRel)
+	}
 	r.result[sourceURL] = url
 	r.state[sourceURL] = 2
 	return url, nil
@@ -531,6 +536,8 @@ type flagSet struct {
 	externalHosts     string
 	configPath        string
 	googleFonts       bool
+	projectPath       string
+	target            string
 }
 
 func mergeSettings(baseDir string, defaults, fileCfg *Config, fs *flagSet, explicit map[string]bool) (Settings, error) {
@@ -713,6 +720,8 @@ func loadSettings(args []string) (Settings, error) {
 	fs.fs.StringVar(&fs.externalHosts, "external-hosts", "", "comma-separated HTTPS hostnames allowed for external asset downloads (empty disables)")
 	fs.fs.BoolVar(&fs.googleFonts, "google-fonts", false, "self-host Google Fonts stylesheets and font binaries")
 	fs.fs.StringVar(&fs.configPath, "config", "", `Path to config file (.toml/.yaml/.yml/.json). Use "-" to disable auto-discovery.`)
+	fs.fs.StringVar(&fs.projectPath, "project", "", "Path to shared project.toml (default CWD/project.toml)")
+	fs.fs.StringVar(&fs.target, "target", "default", "Shared takeoff environment to prepare (no fallback)")
 	fs.fs.Usage = func() {
 		fmt.Println(getUsage())
 		fmt.Println("Options:")
@@ -731,20 +740,7 @@ func loadSettings(args []string) (Settings, error) {
 		explicit[f.Name] = true
 	})
 
-	var fileCfg *Config
-	switch fs.configPath {
-	case "":
-		if path := discoverConfig(baseDir); path != "" {
-			fileCfg, err = loadConfigFile(path)
-		}
-	case "-":
-	default:
-		fileCfg, err = loadConfigFile(fs.configPath)
-	}
-	if err != nil {
-		return Settings{}, err
-	}
-	return mergeSettings(baseDir, defaults, fileCfg, fs, explicit)
+	return resolveSettings(baseDir, defaults, fs, explicit)
 }
 
 func main() {
