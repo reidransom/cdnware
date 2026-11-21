@@ -854,9 +854,7 @@ func run(settings Settings, client *http.Client) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if settings.Namespace != nil {
-		r.assetPrefix = settings.Namespace.AssetPrefix
-	}
+	r.namespace = settings.Namespace
 	if external != nil {
 		r.googleStyles = external.googleStyles
 		external.stripHints = external.canStripGoogleHints(r)

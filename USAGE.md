@@ -75,8 +75,37 @@ authenticated server policy; operators maintain agreement with that policy.
 No alignment check, build hook, preparation invocation, or rewriting is added
 to Takeoff. Build and prepare a clean target-specific tree before deploying.
 
-The shared resolver supplies `Settings.Namespace` (`CDNBaseURL`, `AssetPrefix`)
-and the normalized local paths to the revisioner. Namespace selection is
-implemented here; canonical full-SHA256 public naming and URL encoding belong
-to the separate canonical-naming change. Current local revisioned basenames
-retain cdnware's short-MD5 naming and are not yet a Takeoff URL identity guarantee.
+Integrated preparation keeps the local short-MD5 revisioned basename (for
+example `app.13fa797c.js`). After rewriting dependencies to their final URLs,
+it hashes the actual emitted bytes with full SHA-256 and emits:
+
+```text
+<cdn_base_url>/<asset_prefix><full-sha256>-<local-revisioned-basename>
+```
+
+The prefix and basename are UTF-8 percent-encoded exactly as Takeoff core:
+ASCII letters/digits, `-._~`, and `/` remain literal; every other byte uses an
+uppercase `%HH` escape. Fragments stay on references, not in object identities.
+The full digest is never added to the local filename: Takeoff adds it once
+when deriving the authorized object key from the final file. Nested CSS/JS
+and configured textual assets use the same dependency map before their own
+hashes are fixed. Cycles fail preparation, discard failed destination output,
+and leave site references untouched. Excluded assets retain same-origin
+references; `_emails` private components never enter the revision map.
+Standalone configuration retains its existing short-MD5 public naming.
+
+Final prepared bytes are the bytes uploaded. Subsequent source edits require
+a clean rebuild and preparation; neither upload nor publication corrects URLs.
+
+For the explicit cross-tool contract test, build this repository locally with
+`go build -o .scratch/cdnware .`, then run from the Takeoff checkout:
+
+```sh
+CDNWARE_BIN=/absolute/path/to/cdnware/.scratch/cdnware \
+  cargo test --offline -p deploy-core --test cdnware_contract -- --ignored
+```
+
+This opt-in test needs the other tool's binary, not credentials or services.
+It compares actual generated references and final files with Takeoff core's
+inventory for isolated dev/prod policies; normal standalone suites need no
+cross-repository tool installation.

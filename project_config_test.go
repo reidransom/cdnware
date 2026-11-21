@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -254,12 +256,17 @@ func TestSharedPreparationNeverReadsCredentialsOrContactsDeployment(t *testing.T
 				t.Fatalf("offline preparation = %v, requests=%d: %v", manifest, transport.calls, err)
 			}
 			assetURL := manifest["/static/input/app.js"]
-			if !strings.HasPrefix(assetURL, "https://cdn.development.invalid/site/dev/custom prefix/") || strings.Contains(assetURL, "prod") {
+			if !strings.HasPrefix(assetURL, "https://cdn.development.invalid/site/dev/custom%20prefix/") || strings.Contains(assetURL, "prod") {
 				t.Fatalf("dev asset URL = %s", assetURL)
 			}
-			name := assetURL[strings.LastIndex(assetURL, "/")+1:]
-			if _, err := os.Stat(filepath.Join(dev, "static/revised", name)); err != nil {
-				t.Fatal(err)
+			files, err := os.ReadDir(filepath.Join(dev, "static/revised"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("local revisioned files = %v: %v", files, err)
+			}
+			content, err := os.ReadFile(filepath.Join(dev, "static/revised", files[0].Name()))
+			want := fmt.Sprintf("https://cdn.development.invalid/site/dev/custom%%20prefix/%x-%s", sha256.Sum256(content), files[0].Name())
+			if err != nil || assetURL != want {
+				t.Fatalf("canonical URL = %s, want %s: %v", assetURL, want, err)
 			}
 			if got, err := os.ReadFile(prod); err != nil || string(got) != "untouched production" {
 				t.Fatalf("prod was changed: %q: %v", got, err)
@@ -268,5 +275,83 @@ func TestSharedPreparationNeverReadsCredentialsOrContactsDeployment(t *testing.T
 				t.Fatalf("dev HTML = %q: %v", got, err)
 			}
 		})
+	}
+}
+
+func TestSharedCanonicalGraphFailureLeavesNoPartialOutput(t *testing.T) {
+	root, path := writeSharedProject(t, sharedFixture)
+	dev := filepath.Join(root, "dev output")
+	const html = `<script src="/static/input/a.js"></script>`
+	writeTestFile(t, filepath.Join(dev, "index.html"), html)
+	writeTestFile(t, filepath.Join(dev, "static/input/0.bin"), "written before cycle")
+	writeTestFile(t, filepath.Join(dev, "static/input/a.js"), `import "./b.js";`)
+	writeTestFile(t, filepath.Join(dev, "static/input/b.js"), `import "./a.js";`)
+	settings, err := loadSettings([]string{"--project", path, "--target", "dev", "--rev-include", "**/*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &rejectPreparationNetwork{}
+	manifest, err := run(settings, &http.Client{Transport: transport})
+	if err == nil || !strings.Contains(err.Error(), "asset reference cycle involving /static/input/a.js") || manifest != nil {
+		t.Fatalf("cycle result = %v: %v", manifest, err)
+	}
+	if _, err := os.Stat(filepath.Join(dev, "static/revised")); !os.IsNotExist(err) {
+		t.Fatalf("partial destination survived: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dev, "index.html")); err != nil || string(got) != html || transport.calls != 0 {
+		t.Fatalf("site changed after cycle: %q, requests=%d: %v", got, transport.calls, err)
+	}
+}
+
+func TestSharedCanonicalConfiguredTextAndPrivateInputs(t *testing.T) {
+	root, path := writeSharedProject(t, sharedFixture)
+	dev := filepath.Join(root, "dev output")
+	writeTestFile(t, filepath.Join(dev, "static/input/data.txt"), `"/static/input/blob#part"`)
+	writeTestFile(t, filepath.Join(dev, "static/input/blob"), "no extension")
+	writeTestFile(t, filepath.Join(dev, "static/input/_emails/secret.txt"), "private")
+	writeTestFile(t, filepath.Join(dev, "_emails/receipt.html"), "private")
+	settings, err := loadSettings([]string{"--project", path, "--target", "dev", "--rev-include", "**/*", "--rewrite-ext", ".txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := run(settings, &http.Client{Transport: &rejectPreparationNetwork{}})
+	if err != nil || len(manifest) != 2 {
+		t.Fatalf("manifest = %v: %v", manifest, err)
+	}
+	files, err := os.ReadDir(filepath.Join(dev, "static/revised"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		content, err := os.ReadFile(filepath.Join(dev, "static/revised", file.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(file.Name(), ".txt") && string(content) != `"`+manifest["/static/input/blob"]+`#part"` {
+			t.Fatalf("configured text dependency = %q", content)
+		}
+		want := fmt.Sprintf("https://cdn.development.invalid/site/dev/custom%%20prefix/%x-%s", sha256.Sum256(content), file.Name())
+		found := false
+		for _, url := range manifest {
+			found = found || url == want
+		}
+		if !found {
+			t.Fatalf("final-byte identity missing: %s", want)
+		}
+	}
+}
+
+func TestCanonicalAssetPathEncoding(t *testing.T) {
+	if got, want := encodeAssetPath("a/é 100%+?#[]!$&'()*,;=:@-._~"), "a/%C3%A9%20100%25%2B%3F%23%5B%5D%21%24%26%27%28%29%2A%2C%3B%3D%3A%40-._~"; got != want {
+		t.Fatalf("encoding = %s, want %s", got, want)
+	}
+	for _, path := range []string{"", strings.Repeat("AZaz09-._~/", 4)} {
+		var got string
+		allocations := testing.AllocsPerRun(100, func() {
+			got = encodeAssetPath(path)
+		})
+		if got != path || allocations != 0 {
+			t.Fatalf("unchanged encoding = %q, allocations = %g; want %q with none", got, allocations, path)
+		}
 	}
 }

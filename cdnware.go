@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -66,7 +67,7 @@ type revisioner struct {
 	destDir           string
 	cdn               string
 	assets            map[string]asset
-	assetPrefix       string
+	namespace         *Namespace
 	excluded          map[string]string
 	state             map[string]uint8
 	result            map[string]string
@@ -125,6 +126,52 @@ func publicURL(cdn, path string) string {
 	return strings.TrimRight(cdn, "/") + path
 }
 
+func isUnescapedAssetByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
+		b >= '0' && b <= '9' || b == '-' || b == '.' || b == '_' || b == '~' || b == '/'
+}
+
+// encodeAssetPath matches Takeoff core's encode_path: UTF-8 bytes, uppercase
+// percent escapes, and only RFC 3986 unreserved bytes plus slash left literal.
+func encodeAssetPath(path string) string {
+	const hex = "0123456789ABCDEF"
+	first, escapes := len(path), 0
+	for i := range len(path) {
+		if !isUnescapedAssetByte(path[i]) {
+			if escapes == 0 {
+				first = i
+			}
+			escapes++
+		}
+	}
+	if escapes == 0 {
+		return path
+	}
+
+	var encoded strings.Builder
+	encoded.Grow(len(path) + 2*escapes)
+	encoded.WriteString(path[:first])
+	for i := first; i < len(path); i++ {
+		b := path[i]
+		if isUnescapedAssetByte(b) {
+			encoded.WriteByte(b)
+		} else {
+			encoded.WriteByte('%')
+			encoded.WriteByte(hex[b>>4])
+			encoded.WriteByte(hex[b&15])
+		}
+	}
+	return encoded.String()
+}
+
+func assetReferences(path string) []string {
+	encoded := encodeAssetPath(path)
+	if encoded == path {
+		return []string{path}
+	}
+	return []string{encoded, path}
+}
+
 func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude, rewriteExtensions []string) (*revisioner, error) {
 	if filepath.Clean(srcDir) == filepath.Clean(destDir) {
 		return nil, errors.New("source and destination directories must differ")
@@ -163,10 +210,14 @@ func newRevisioner(baseDir, cdn, srcDir, destDir string, revInclude, revExclude,
 		if err != nil {
 			return err
 		}
+		url := "/" + filepath.ToSlash(filepath.Join(r.srcDir, rel))
+		// Never flatten private email inputs into a public CDN destination.
+		if strings.Contains(url, "/_emails/") || strings.HasSuffix(url, "/_emails") {
+			return nil
+		}
 		if filepath.ToSlash(rel) == "lib/.cdnware/state.json" {
 			return nil
 		}
-		url := "/" + filepath.ToSlash(filepath.Join(r.srcDir, rel))
 		if revInclude != nil || len(revExclude) != 0 {
 			name := strings.ToLower(filepath.ToSlash(rel))
 			selected := revInclude == nil
@@ -265,8 +316,10 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if dependency.url == current.url {
 			continue
 		}
-		if referenceIndex(content, []byte(sourceURL)) >= 0 {
-			replacements = append(replacements, replacement{old: sourceURL, url: dependency.url})
+		for _, reference := range assetReferences(sourceURL) {
+			if referenceIndex(content, []byte(reference)) >= 0 {
+				replacements = append(replacements, replacement{old: reference, url: dependency.url})
+			}
 		}
 
 		rel, err := filepath.Rel(currentDir, dependency.rel)
@@ -277,8 +330,10 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if !strings.HasPrefix(rel, ".") {
 			rel = "./" + rel
 		}
-		if referenceIndex(content, []byte(rel)) >= 0 {
-			replacements = append(replacements, replacement{old: rel, url: dependency.url})
+		for _, reference := range assetReferences(rel) {
+			if referenceIndex(content, []byte(reference)) >= 0 {
+				replacements = append(replacements, replacement{old: reference, url: dependency.url})
+			}
 		}
 	}
 	for sourceURL, relPath := range r.excluded {
@@ -290,12 +345,21 @@ func (r *revisioner) dependencies(current asset, content []byte) []replacement {
 		if !strings.HasPrefix(rel, ".") {
 			rel = "./" + rel
 		}
-		if referenceIndex(content, []byte(rel)) >= 0 {
-			replacements = append(replacements, replacement{old: rel, url: sourceURL})
+		for _, reference := range assetReferences(rel) {
+			if referenceIndex(content, []byte(reference)) >= 0 {
+				target := sourceURL
+				if r.namespace != nil {
+					target = encodeAssetPath(target)
+				}
+				replacements = append(replacements, replacement{old: reference, url: target})
+			}
 		}
 	}
 
 	sort.Slice(replacements, func(i, j int) bool {
+		if len(replacements[i].old) == len(replacements[j].old) {
+			return replacements[i].old < replacements[j].old
+		}
 		return len(replacements[i].old) > len(replacements[j].old)
 	})
 	return replacements
@@ -377,8 +441,12 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 	}
 
 	url := publicURL(r.cdn, filepath.Join(r.destDir, destRel))
-	if r.assetPrefix != "" {
-		url = publicURL(r.cdn, r.assetPrefix+destRel)
+	if r.namespace != nil {
+		key := fmt.Sprintf("%s%x-%s", r.namespace.AssetPrefix, sha256.Sum256(content), destRel)
+		if len(key) > 1024 {
+			return "", errors.New("asset object key exceeds 1024 bytes")
+		}
+		url = r.namespace.CDNBaseURL + "/" + encodeAssetPath(key)
 	}
 	r.result[sourceURL] = url
 	r.state[sourceURL] = 2
@@ -398,6 +466,10 @@ func (r *revisioner) revise() (map[string]string, error) {
 	sort.Strings(urls)
 	for _, url := range urls {
 		if _, err := r.writeAsset(url); err != nil {
+			// Do not leave a usable subset of a failed dependency graph.
+			if cleanupErr := os.RemoveAll(destination); cleanupErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("clearing failed destination: %w", cleanupErr))
+			}
 			return nil, err
 		}
 	}
@@ -436,7 +508,9 @@ func repFile(path string, manifest map[string]string) error {
 	}
 	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
 	for _, sourceURL := range keys {
-		content = replaceAssetReference(content, []byte(sourceURL), []byte(manifest[sourceURL]))
+		for _, reference := range assetReferences(sourceURL) {
+			content = replaceAssetReference(content, []byte(reference), []byte(manifest[sourceURL]))
+		}
 	}
 	if bytes.Equal(content, original) {
 		return nil

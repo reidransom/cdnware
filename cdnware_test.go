@@ -150,8 +150,8 @@ func TestCLIHandlesFlatDestinationCollisions(t *testing.T) {
 				if err == nil || !strings.Contains(output, "conflicting flat destination") {
 					t.Fatalf("expected flat destination collision error: err=%v output=%s", err, output)
 				}
-				if got := readTestFile(t, filepath.Join(root, "assets-rev/shared.94141742.bin")); got != tc.first {
-					t.Fatalf("collision overwrote first asset: %q", got)
+				if _, err := os.Stat(filepath.Join(root, "assets-rev")); !os.IsNotExist(err) {
+					t.Fatalf("collision left partial destination output: %v", err)
 				}
 				if got := readTestFile(t, index); got != page {
 					t.Fatalf("failed revisioning rewrote site references: %s", got)
