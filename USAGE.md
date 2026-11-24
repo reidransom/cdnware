@@ -21,30 +21,33 @@ google_fonts = false
 
 [takeoff.default]
 directory = "./_site"
-cdn_base_url = "https://cdn.example.com"
-asset_prefix = "example/prod/assets-rev/"
+cdn_base_url = "https://cdn.example.com/example/prod/assets-rev/"
 
 [takeoff.dev]
 directory = "./_site-dev"
-cdn_base_url = "https://cdn.example.com"
-asset_prefix = "example/dev/assets-rev/"
+cdn_base_url = "https://cdn.example.com/example/dev/assets-rev/"
+bucket_key_prefix = "storage/example/dev/"
 ```
 
 The default target name is `default`; every integrated target must exist and
-provide its own `cdn_base_url` and `asset_prefix`. A named target never inherits
-another target's directory or namespace. An omitted directory is `./_site`,
+provide its own full `cdn_base_url`. A named target never inherits
+another target's directory or public URL prefix. An omitted directory is `./_site`,
 matching Takeoff. Paths in target tables are relative to the selected project
 file, not the process working directory. Absolute target directories are also
 supported. Shared `src` and `dest` default to `assets` and `assets-rev`; they
 must be nonempty relative directories inside that output, with no parent
 components. Leading `./`, repeated separators and trailing `/` normalize away.
-Takeoff derives its default CDN routing prefix from the same normalized `dest`
-plus `/`; its explicit routing overrides remain authoritative for routing.
-The namespace prefix is independent of the local destination directory.
+Takeoff derives its default local CDN routing prefix from the same normalized
+`dest` plus `/`; its `cdn_prefixes` overrides remain authoritative for routing.
+`dest` selects local output, not the public URL path. The optional
+`bucket_key_prefix` selects a storage prefix in Takeoff only and never changes
+prepared URLs.
 
-`cdn_base_url` is an HTTPS origin without credentials, path, query or fragment
-(an optional trailing slash is removed). `asset_prefix` is an unescaped relative
-path ending in `/`, without empty/dot components, backslashes, query or fragment.
+`cdn_base_url` is a full HTTPS URL with a nonempty path ending in `/`. It cannot
+contain credentials, a query, or a fragment. Its path cannot contain empty
+interior segments, dot segments, backslashes, or percent-encoded separators.
+The former `asset_prefix` setting is no longer accepted; put the public path in
+`cdn_base_url` instead.
 Shared `[cdnware]` accepts `src`, `dest`, `rev_include`, `rev_exclude`,
 `rewrite_extensions`, `external_hosts`, and `google_fonts`; it does not accept
 standalone `cdn`. Unknown transformation/target fields and malformed typed data
@@ -52,8 +55,8 @@ are errors; unrelated project tables are ignored without logging their values.
 
 Explicit transformation flags still replace configured values. A positional
 SITEROOT overrides the selected target directory and remains relative to CWD;
-`--cdn` overrides the selected CDN origin, not its asset prefix. Integrated
-path/namespace validation still applies to overrides. Missing target hints are
+`--cdn` replaces the entire selected public URL prefix and must satisfy the
+same URL validation. Missing target hints are
 errors even when flags are supplied. Prefer target configuration for normal
 preparation so it matches Takeoff's selected output.
 
@@ -75,27 +78,26 @@ authenticated server policy; operators maintain agreement with that policy.
 No alignment check, build hook, preparation invocation, or rewriting is added
 to Takeoff. Build and prepare a clean target-specific tree before deploying.
 
-Integrated preparation keeps the local short-MD5 revisioned basename (for
-example `app.13fa797c.js`). After rewriting dependencies to their final URLs,
-it hashes the actual emitted bytes with full SHA-256 and emits:
+Integrated preparation appends the URL-encoded flat revisioned basename to
+`cdn_base_url`. For example, `app.13fa797c.js` becomes
+`https://cdn.example.com/example/dev/assets-rev/app.13fa797c.js` for the dev
+target above. There is no additional digest in the public URL or local filename.
 
-```text
-<cdn_base_url>/<asset_prefix><full-sha256>-<local-revisioned-basename>
-```
-
-The prefix and basename are UTF-8 percent-encoded exactly as Takeoff core:
-ASCII letters/digits, `-._~`, and `/` remain literal; every other byte uses an
-uppercase `%HH` escape. Fragments stay on references, not in object identities.
-The full digest is never added to the local filename: Takeoff adds it once
-when deriving the authorized object key from the final file. Nested CSS/JS
-and configured textual assets use the same dependency map before their own
-hashes are fixed. Cycles fail preparation, discard failed destination output,
-and leave site references untouched. Excluded assets retain same-origin
-references; `_emails` private components never enter the revision map.
+In the prefix path and basename, ASCII letters and digits, `-._~`, and path
+separators remain literal; every other UTF-8 byte uses an uppercase `%HH`
+escape. Fragments stay on references, not in object identities. Nested CSS/JS
+and configured textual assets are rewritten before their emitted bytes are
+hashed for the eight-hex-character MD5 revision. Cycles fail preparation,
+discard failed destination output, and leave site references untouched.
+Excluded assets retain same-origin references; `_emails` private components
+never enter the revision map.
 Standalone configuration retains its existing short-MD5 public naming.
 
 Final prepared bytes are the bytes uploaded. Subsequent source edits require
 a clean rebuild and preparation; neither upload nor publication corrects URLs.
+If two builds produce different bytes with the same short revision hash and
+basename, Takeoff can silently reuse an older stored object unless you deploy
+with `--checksum`.
 
 For the explicit cross-tool contract test, build this repository locally with
 `go build -o .scratch/cdnware .`, then run from the Takeoff checkout:
