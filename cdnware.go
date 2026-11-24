@@ -440,13 +440,11 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 		}
 	}
 
-	url := publicURL(r.cdn, filepath.Join(r.destDir, destRel))
+	var url string
 	if r.namespace != nil {
-		key := fmt.Sprintf("%s%x-%s", r.namespace.AssetPrefix, sha256.Sum256(content), destRel)
-		if len(key) > 1024 {
-			return "", errors.New("asset object key exceeds 1024 bytes")
-		}
-		url = r.namespace.CDNBaseURL + "/" + encodeAssetPath(key)
+		url = r.namespace.CDNBaseURL + encodeAssetPath(fmt.Sprintf("%x-%s", sha256.Sum256(content), destRel))
+	} else {
+		url = publicURL(r.cdn, filepath.Join(r.destDir, destRel))
 	}
 	r.result[sourceURL] = url
 	r.state[sourceURL] = 2

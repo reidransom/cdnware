@@ -12,6 +12,8 @@ import (
 	"testing"
 )
 
+const sharedDevPrefix = "https://cdn.development.invalid/site/dev/custom%20prefix/"
+
 const sharedFixture = `
 [unrelated]
 secret = "unrelated-secret"
@@ -31,16 +33,15 @@ site = "production"
 branch = "production"
 directory = "./prod output"
 api_key_env = "PRODUCTION_TOKEN"
-cdn_base_url = "https://cdn.production.invalid"
-asset_prefix = "production/prod/assets-rev/"
+cdn_base_url = "https://cdn.production.invalid/production/prod/assets-rev/"
 [takeoff.dev]
 url = "https://deployment.invalid"
 site = "site"
 branch = "main"
 directory = "./dev output"
 api_key_env = "DEVELOPMENT_TOKEN"
-cdn_base_url = "https://cdn.development.invalid/"
-asset_prefix = "site/dev/custom prefix/"
+cdn_base_url = "https://cdn.development.invalid/site/dev/custom prefix/"
+bucket_key_prefix = "storage/dev/assets-rev/"
 `
 
 func writeSharedProject(t *testing.T, content string) (string, string) {
@@ -54,17 +55,17 @@ func writeSharedProject(t *testing.T, content string) (string, string) {
 func TestSharedProjectTargetIsolation(t *testing.T) {
 	root, path := writeSharedProject(t, sharedFixture)
 	for _, tc := range []struct {
-		target, directory, base, prefix string
+		target, directory, prefix string
 	}{
-		{"dev", "dev output", "https://cdn.development.invalid", "site/dev/custom prefix/"},
-		{"default", "prod output", "https://cdn.production.invalid", "production/prod/assets-rev/"},
+		{"dev", "dev output", sharedDevPrefix},
+		{"default", "prod output", "https://cdn.production.invalid/production/prod/assets-rev/"},
 	} {
 		t.Run(tc.target, func(t *testing.T) {
 			settings, err := loadSettings([]string{"--project", path, "--target", tc.target})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if settings.BaseDir != filepath.Join(root, tc.directory) || settings.Cdn != tc.base || settings.Namespace == nil || settings.Namespace.AssetPrefix != tc.prefix {
+			if settings.BaseDir != filepath.Join(root, tc.directory) || settings.Cdn != tc.prefix || settings.Namespace == nil || settings.Namespace.CDNBaseURL != tc.prefix {
 				t.Fatalf("selected settings = %+v, namespace = %+v", settings, settings.Namespace)
 			}
 			if settings.Src != "static/input" || settings.Dest != "static/revised" || !reflect.DeepEqual(settings.RevInclude, []string{"**/*.js", "**/*.css"}) || !reflect.DeepEqual(settings.RevExclude, []string{"private/**"}) || !reflect.DeepEqual(settings.RewriteExtensions, []string{".css", ".js"}) || len(settings.ExternalHosts) != 0 || settings.GoogleFonts {
@@ -73,7 +74,7 @@ func TestSharedProjectTargetIsolation(t *testing.T) {
 		})
 	}
 	defaults, err := loadSettings([]string{"--project", path})
-	if err != nil || defaults.Namespace == nil || defaults.Namespace.AssetPrefix != "production/prod/assets-rev/" {
+	if err != nil || defaults.Namespace == nil || defaults.Namespace.CDNBaseURL != "https://cdn.production.invalid/production/prod/assets-rev/" {
 		t.Fatalf("default target = %+v: %v", defaults, err)
 	}
 }
@@ -87,12 +88,13 @@ func TestSharedProjectDiscoveryAndExplicitPrecedence(t *testing.T) {
 		t.Fatalf("CWD project selection = %+v: %v", settings, err)
 	}
 	// A selected shared project wins over stale auto-discovered standalone data.
-	if settings.Cdn != "https://cdn.development.invalid" {
+	if settings.Cdn != sharedDevPrefix {
 		t.Fatalf("shared CDN = %q", settings.Cdn)
 	}
 	override := filepath.Join(t.TempDir(), "explicit output")
-	settings, err = loadSettings([]string{"--project", path, "--target", "dev", "--src", "./custom input/", "--dest", "./custom output/", "--cdn", "https://override.invalid", "--rev-include", "", "--rev-exclude", "", "--rewrite-ext", "", override})
-	if err != nil || settings.BaseDir != override || settings.Src != "custom input" || settings.Dest != "custom output" || settings.Cdn != "https://override.invalid" || settings.Namespace.AssetPrefix != "site/dev/custom prefix/" || len(settings.RevInclude) != 0 || len(settings.RevExclude) != 0 || len(settings.RewriteExtensions) != 0 {
+	settings, err = loadSettings([]string{"--project", path, "--target", "dev", "--src", "./custom input/", "--dest", "./custom output/", "--cdn", "https://override.invalid/new%20prefix%2b/", "--rev-include", "", "--rev-exclude", "", "--rewrite-ext", "", override})
+	const overridePrefix = "https://override.invalid/new%20prefix%2B/"
+	if err != nil || settings.BaseDir != override || settings.Src != "custom input" || settings.Dest != "custom output" || settings.Cdn != overridePrefix || settings.Namespace == nil || settings.Namespace.CDNBaseURL != overridePrefix || len(settings.RevInclude) != 0 || len(settings.RevExclude) != 0 || len(settings.RewriteExtensions) != 0 {
 		t.Fatalf("explicit overrides = %+v: %v", settings, err)
 	}
 	settings, err = loadSettings([]string{"--config", "cdnware.toml"})
@@ -117,6 +119,12 @@ func TestSharedProjectDiscoveryAndExplicitPrecedence(t *testing.T) {
 	if err != nil || settings.BaseDir != filepath.Join(root, "dev output") {
 		t.Fatalf("relative explicit project = %+v: %v", settings, err)
 	}
+
+	// The new HTTPS prefix requirements apply only to integrated --cdn.
+	settings, err = loadSettings([]string{"--config", "-", "--cdn", "http://legacy.invalid/path"})
+	if err != nil || settings.Namespace != nil || settings.Cdn != "http://legacy.invalid/path" {
+		t.Fatalf("explicit standalone CDN = %+v: %v", settings, err)
+	}
 }
 
 func TestSharedExternalAcquisitionRemainsExplicit(t *testing.T) {
@@ -136,13 +144,59 @@ func TestSharedExternalAcquisitionRemainsExplicit(t *testing.T) {
 	}
 }
 
+func TestSharedCDNPrefix(t *testing.T) {
+	for _, tc := range []struct{ name, input, canonical string }{
+		{"canonical", "https://cdn.example.com/site/prod/assets-rev/", "https://cdn.example.com/site/prod/assets-rev/"},
+		{"canonicalize UTF-8 and escapes", "https://cdn.example.com/pub/café%20%2b/%7e/", "https://cdn.example.com/pub/caf%C3%A9%20%2B/~/"},
+		{"path punctuation", "https://cdn.example.com/pub/a b+c@%23%3f%25/", "https://cdn.example.com/pub/a%20b%2Bc%40%23%3F%25/"},
+		{"HTTP", "http://cdn.example.com/pub/", ""},
+		{"missing host", "https:///pub/", ""},
+		{"missing path", "https://cdn.example.com", ""},
+		{"root only", "https://cdn.example.com/", ""},
+		{"missing trailing slash", "https://cdn.example.com/pub", ""},
+		{"credentials", "https://user:secret-do-not-log@cdn.example.com/pub/", ""},
+		{"query", "https://cdn.example.com/pub/?secret-do-not-log", ""},
+		{"empty query", "https://cdn.example.com/pub/?", ""},
+		{"fragment", "https://cdn.example.com/pub/#secret-do-not-log", ""},
+		{"empty fragment", "https://cdn.example.com/pub/#", ""},
+		{"dot segment", "https://cdn.example.com/pub/./assets/", ""},
+		{"parent segment", "https://cdn.example.com/pub/../assets/", ""},
+		{"encoded parent segment", "https://cdn.example.com/pub/%2e./assets/", ""},
+		{"encoded slash", "https://cdn.example.com/pub%2fassets/", ""},
+		{"encoded trailing slash", "https://cdn.example.com/pub%2F", ""},
+		{"encoded backslash", "https://cdn.example.com/pub%5Cassets/", ""},
+		{"literal backslash", `https://cdn.example.com/pub\assets/`, ""},
+		{"empty interior segment", "https://cdn.example.com/pub//assets/", ""},
+		{"empty first segment", "https://cdn.example.com//pub/", ""},
+		{"malformed escape", "https://cdn.example.com/pub/%6/", ""},
+		{"invalid UTF-8", "https://cdn.example.com/pub/%FF/", ""},
+		{"encoded NUL", "https://cdn.example.com/pub/%00/", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, path := writeSharedProject(t, fmt.Sprintf("[cdnware]\n[takeoff.default]\ncdn_base_url = %q\n", tc.input))
+			_, validPath := writeSharedProject(t, sharedFixture)
+			for _, args := range [][]string{{"--project", path}, {"--project", validPath, "--cdn", tc.input}} {
+				settings, err := loadSettings(args)
+				if tc.canonical == "" {
+					if err == nil || strings.Contains(err.Error(), "secret-do-not-log") {
+						t.Fatalf("expected a redacted error, got %v for %v", err, args)
+					}
+				} else if err != nil || settings.Namespace == nil || settings.Namespace.CDNBaseURL != tc.canonical || settings.Cdn != tc.canonical {
+					t.Fatalf("CDN prefix = %q, want %q: %v", settings.Cdn, tc.canonical, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSharedProjectRejectsMalformedDataWithoutSecrets(t *testing.T) {
 	for _, tc := range []struct {
 		name, from, to string
 	}{
 		{"missing target", "[takeoff.dev]", "[takeoff.other]"},
-		{"missing base", "cdn_base_url = \"https://cdn.development.invalid/\"", ""},
-		{"missing prefix", "asset_prefix = \"site/dev/custom prefix/\"", ""},
+		{"missing base", "cdn_base_url = \"https://cdn.development.invalid/site/dev/custom prefix/\"", ""},
+		{"obsolete prefix", "bucket_key_prefix", "asset_prefix"},
+		{"invalid bucket prefix type", "bucket_key_prefix = \"storage/dev/assets-rev/\"", "bucket_key_prefix = 17"},
 		{"empty directory", "directory = \"./dev output\"", "directory = \"\""},
 		{"invalid target type", "directory = \"./dev output\"", "directory = 17"},
 		{"invalid credential type", "api_key_env = \"DEVELOPMENT_TOKEN\"", "api_key_env = 17"},
@@ -156,19 +210,7 @@ func TestSharedProjectRejectsMalformedDataWithoutSecrets(t *testing.T) {
 		{"parent src", "./static/input/", "static/../input"},
 		{"absolute src", "./static/input/", "/static/input"},
 		{"drive src", "./static/input/", "C:input"},
-		{"empty base", "https://cdn.development.invalid/", ""},
-		{"HTTP base", "https://cdn.development.invalid/", "http://cdn.invalid/"},
-		{"path base", "https://cdn.development.invalid/", "https://cdn.invalid/path"},
-		{"credentials base", "https://cdn.development.invalid/", "https://secret-do-not-log@cdn.invalid/"},
-		{"query base", "https://cdn.development.invalid/", "https://cdn.invalid/?secret-do-not-log"},
-		{"fragment base", "https://cdn.development.invalid/", "https://cdn.invalid/#"},
-		{"empty prefix", "site/dev/custom prefix/", ""},
-		{"absolute prefix", "site/dev/custom prefix/", "/prod/"},
-		{"dot prefix", "site/dev/custom prefix/", "site/../prod/"},
-		{"empty prefix component", "site/dev/custom prefix/", "site//dev/"},
-		{"no trailing slash", "site/dev/custom prefix/", "site/dev"},
-		{"escaped prefix", "site/dev/custom prefix/", "site/%2e%2e/prod/"},
-		{"query prefix", "site/dev/custom prefix/", "site/dev?secret-do-not-log/"},
+		{"empty base", "https://cdn.development.invalid/site/dev/custom prefix/", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, path := writeSharedProject(t, strings.Replace(sharedFixture, tc.from, tc.to, 1))
@@ -220,7 +262,7 @@ func TestSharedProjectMissingSourcesAndStandaloneRegressions(t *testing.T) {
 		t.Fatalf("unrelated project must preserve standalone = %+v: %v", settings, err)
 	}
 	// Shared defaults agree with Takeoff's default directory and routing.
-	writeTestFile(t, filepath.Join(root, "project.toml"), "[cdnware]\n[takeoff.default]\ncdn_base_url = \"https://cdn.invalid\"\nasset_prefix = \"site/default/assets-rev/\"\n")
+	writeTestFile(t, filepath.Join(root, "project.toml"), "[cdnware]\n[takeoff.default]\ncdn_base_url = \"https://cdn.invalid/site/default/assets-rev/\"\n")
 	settings, err = loadSettings(nil)
 	if err != nil || settings.BaseDir != filepath.Join(root, "_site") || settings.Src != "assets" || settings.Dest != "assets-rev" {
 		t.Fatalf("shared defaults = %+v: %v", settings, err)
@@ -256,7 +298,7 @@ func TestSharedPreparationNeverReadsCredentialsOrContactsDeployment(t *testing.T
 				t.Fatalf("offline preparation = %v, requests=%d: %v", manifest, transport.calls, err)
 			}
 			assetURL := manifest["/static/input/app.js"]
-			if !strings.HasPrefix(assetURL, "https://cdn.development.invalid/site/dev/custom%20prefix/") || strings.Contains(assetURL, "prod") {
+			if !strings.HasPrefix(assetURL, sharedDevPrefix) || strings.Contains(assetURL, "prod") {
 				t.Fatalf("dev asset URL = %s", assetURL)
 			}
 			files, err := os.ReadDir(filepath.Join(dev, "static/revised"))
@@ -264,7 +306,7 @@ func TestSharedPreparationNeverReadsCredentialsOrContactsDeployment(t *testing.T
 				t.Fatalf("local revisioned files = %v: %v", files, err)
 			}
 			content, err := os.ReadFile(filepath.Join(dev, "static/revised", files[0].Name()))
-			want := fmt.Sprintf("https://cdn.development.invalid/site/dev/custom%%20prefix/%x-%s", sha256.Sum256(content), files[0].Name())
+			want := sharedDevPrefix + fmt.Sprintf("%x-%s", sha256.Sum256(content), files[0].Name())
 			if err != nil || assetURL != want {
 				t.Fatalf("canonical URL = %s, want %s: %v", assetURL, want, err)
 			}
@@ -330,7 +372,7 @@ func TestSharedCanonicalConfiguredTextAndPrivateInputs(t *testing.T) {
 		if strings.HasSuffix(file.Name(), ".txt") && string(content) != `"`+manifest["/static/input/blob"]+`#part"` {
 			t.Fatalf("configured text dependency = %q", content)
 		}
-		want := fmt.Sprintf("https://cdn.development.invalid/site/dev/custom%%20prefix/%x-%s", sha256.Sum256(content), file.Name())
+		want := sharedDevPrefix + fmt.Sprintf("%x-%s", sha256.Sum256(content), file.Name())
 		found := false
 		for _, url := range manifest {
 			found = found || url == want

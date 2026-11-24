@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -14,19 +15,18 @@ import (
 // Namespace contains local preparation hints, never deployment authorization.
 // A non-nil namespace selects shared-project behavior, without a feature flag.
 type Namespace struct {
-	CDNBaseURL  string
-	AssetPrefix string
+	CDNBaseURL string
 }
 
 type projectTarget struct {
-	URL         *string   `toml:"url"`
-	Site        *string   `toml:"site"`
-	Branch      *string   `toml:"branch"`
-	Directory   *string   `toml:"directory"`
-	CDNPrefixes *[]string `toml:"cdn_prefixes"`
-	APIKeyEnv   *string   `toml:"api_key_env"`
-	CDNBaseURL  *string   `toml:"cdn_base_url"`
-	AssetPrefix *string   `toml:"asset_prefix"`
+	URL             *string   `toml:"url"`
+	Site            *string   `toml:"site"`
+	Branch          *string   `toml:"branch"`
+	Directory       *string   `toml:"directory"`
+	CDNPrefixes     *[]string `toml:"cdn_prefixes"`
+	APIKeyEnv       *string   `toml:"api_key_env"`
+	CDNBaseURL      *string   `toml:"cdn_base_url"`
+	BucketKeyPrefix *string   `toml:"bucket_key_prefix"` // Storage only; not used during preparation.
 }
 
 type sharedProject struct {
@@ -60,7 +60,7 @@ func loadProject(path, target string) (*Config, string, *Namespace, error) {
 		return nil, "", nil, nil
 	}
 	if project.Cdnware.Cdn != nil {
-		return nil, "", nil, errors.New("shared [cdnware] does not accept cdn; configure cdn_base_url and asset_prefix on each takeoff target")
+		return nil, "", nil, errors.New("shared [cdnware] does not accept cdn; configure cdn_base_url on each takeoff target")
 	}
 	// Validate shared directories before flag merging, just as Takeoff does.
 	for _, dir := range []*string{project.Cdnware.Src, project.Cdnware.Dest} {
@@ -75,13 +75,14 @@ func loadProject(path, target string) (*Config, string, *Namespace, error) {
 	if !ok {
 		return nil, "", nil, fmt.Errorf("unknown takeoff environment %q; configure its [takeoff.<environment>] table", target)
 	}
-	if selected.CDNBaseURL == nil || selected.AssetPrefix == nil {
-		return nil, "", nil, fmt.Errorf("takeoff environment %q requires cdn_base_url and asset_prefix for preparation", target)
+	if selected.CDNBaseURL == nil {
+		return nil, "", nil, fmt.Errorf("takeoff environment %q requires cdn_base_url for preparation", target)
 	}
-	namespace := &Namespace{CDNBaseURL: *selected.CDNBaseURL, AssetPrefix: *selected.AssetPrefix}
-	if err := validateNamespace(namespace); err != nil {
+	prefix, err := canonicalCDNPrefix(*selected.CDNBaseURL)
+	if err != nil {
 		return nil, "", nil, err
 	}
+	namespace := &Namespace{CDNBaseURL: prefix}
 	directory := "./_site"
 	if selected.Directory != nil {
 		directory = *selected.Directory
@@ -125,22 +126,28 @@ func hasDrivePrefix(value string) bool {
 	return len(value) >= 2 && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) && value[1] == ':'
 }
 
-func validateNamespace(namespace *Namespace) error {
-	u, err := url.Parse(namespace.CDNBaseURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || (u.Path != "" && u.Path != "/") || strings.ContainsAny(namespace.CDNBaseURL, " \t\r\n\\?#") {
-		return errors.New("cdn_base_url must be an HTTPS origin without credentials, path, query, or fragment")
+func canonicalCDNPrefix(value string) (string, error) {
+	invalid := errors.New("cdn_base_url must be an HTTPS URL with a nonempty path prefix ending in /, without credentials, query, or fragment")
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || strings.ContainsAny(value, "?#") {
+		return "", invalid
 	}
-	namespace.CDNBaseURL = strings.TrimSuffix(namespace.CDNBaseURL, "/")
-	prefix := namespace.AssetPrefix
-	if !strings.HasSuffix(prefix, "/") || strings.ContainsAny(prefix, "\\\x00?#%") || hasDrivePrefix(prefix) {
-		return errors.New("asset_prefix must be a relative, unescaped path ending in /")
+	path := u.Path
+	if len(path) < 2 || path[0] != '/' || path[len(path)-1] != '/' || !utf8.ValidString(path) ||
+		strings.ContainsFunc(path, func(c rune) bool { return c < ' ' || c == 0x7f || c == '\\' }) {
+		return "", invalid
 	}
-	for _, part := range strings.Split(strings.TrimSuffix(prefix, "/"), "/") {
-		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, "\r\n\t") {
-			return errors.New("asset_prefix must be a relative, unescaped path ending in /")
+	// Any extra slash introduced by percent decoding was an encoded separator.
+	if u.RawPath != "" && strings.Count(u.RawPath, "/") != strings.Count(path, "/") {
+		return "", invalid
+	}
+	for part := range strings.SplitSeq(path[1:len(path)-1], "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", invalid
 		}
 	}
-	return nil
+	u.RawPath = encodeAssetPath(path)
+	return u.String(), nil
 }
 
 func resolveSettings(baseDir string, defaults *Config, fs *flagSet, explicit map[string]bool) (Settings, error) {
@@ -195,8 +202,8 @@ func resolveSettings(baseDir string, defaults *Config, fs *flagSet, explicit map
 		return settings, err
 	}
 	if explicit["cdn"] {
-		namespace.CDNBaseURL = fs.cdn
-		if err := validateNamespace(namespace); err != nil {
+		namespace.CDNBaseURL, err = canonicalCDNPrefix(fs.cdn)
+		if err != nil {
 			return Settings{}, err
 		}
 	}
