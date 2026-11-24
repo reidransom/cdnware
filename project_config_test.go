@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"net/http"
@@ -305,10 +305,9 @@ func TestSharedPreparationNeverReadsCredentialsOrContactsDeployment(t *testing.T
 			if err != nil || len(files) != 1 {
 				t.Fatalf("local revisioned files = %v: %v", files, err)
 			}
-			content, err := os.ReadFile(filepath.Join(dev, "static/revised", files[0].Name()))
-			want := sharedDevPrefix + fmt.Sprintf("%x-%s", sha256.Sum256(content), files[0].Name())
-			if err != nil || assetURL != want {
-				t.Fatalf("canonical URL = %s, want %s: %v", assetURL, want, err)
+			want := sharedDevPrefix + files[0].Name()
+			if assetURL != want {
+				t.Fatalf("canonical URL = %s, want %s", assetURL, want)
 			}
 			if got, err := os.ReadFile(prod); err != nil || string(got) != "untouched production" {
 				t.Fatalf("prod was changed: %q: %v", got, err)
@@ -372,14 +371,65 @@ func TestSharedCanonicalConfiguredTextAndPrivateInputs(t *testing.T) {
 		if strings.HasSuffix(file.Name(), ".txt") && string(content) != `"`+manifest["/static/input/blob"]+`#part"` {
 			t.Fatalf("configured text dependency = %q", content)
 		}
-		want := sharedDevPrefix + fmt.Sprintf("%x-%s", sha256.Sum256(content), file.Name())
+		want := sharedDevPrefix + file.Name()
 		found := false
 		for _, url := range manifest {
 			found = found || url == want
 		}
 		if !found {
-			t.Fatalf("final-byte identity missing: %s", want)
+			t.Fatalf("revisioned file URL missing: %s", want)
 		}
+	}
+}
+
+func TestSharedPreparationUsesFlatEncodedBasenamesWithOrWithoutBucketOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		bucketPrefix string
+	}{
+		{"default", ""},
+		{"override", `bucket_key_prefix = "different/storage/"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := strings.Replace(sharedFixture, `bucket_key_prefix = "storage/dev/assets-rev/"`, tc.bucketPrefix, 1)
+			root, path := writeSharedProject(t, fixture)
+			dev := filepath.Join(root, "dev output")
+			const (
+				sourceCSS  = "/static/input/css/nested/app.css"
+				sourceIcon = "/static/input/img/é 100%+#.svg"
+				icon       = "<svg/>"
+			)
+			writeTestFile(t, filepath.Join(dev, sourceCSS), `body { background: url("../../img/%C3%A9%20100%25%2B%23.svg#part"); }`)
+			writeTestFile(t, filepath.Join(dev, sourceIcon), icon)
+			writeTestFile(t, filepath.Join(dev, "index.html"), `<link rel="stylesheet" href="`+sourceCSS+`">`)
+
+			iconRevision := fmt.Sprintf("%x", md5.Sum([]byte(icon)))[:8]
+			iconName := "é 100%+#." + iconRevision + ".svg"
+			iconURL := sharedDevPrefix + "%C3%A9%20100%25%2B%23." + iconRevision + ".svg"
+			css := `body { background: url("` + iconURL + `#part"); }`
+			cssRevision := fmt.Sprintf("%x", md5.Sum([]byte(css)))[:8]
+			cssName := "app." + cssRevision + ".css"
+			cssURL := sharedDevPrefix + cssName
+
+			settings, err := loadSettings([]string{"--project", path, "--target", "dev", "--rev-include", "**/*"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := run(settings, &http.Client{Transport: &rejectPreparationNetwork{}})
+			want := map[string]string{sourceCSS: cssURL, sourceIcon: iconURL}
+			if err != nil || !reflect.DeepEqual(manifest, want) {
+				t.Fatalf("manifest = %v, want %v: %v", manifest, want, err)
+			}
+			for name, want := range map[string]string{
+				"static/revised/" + cssName:  css,
+				"static/revised/" + iconName: icon,
+				"index.html":                 `<link rel="stylesheet" href="` + cssURL + `">`,
+			} {
+				if got := readTestFile(t, filepath.Join(dev, name)); got != want {
+					t.Errorf("%s = %q, want %q", name, got, want)
+				}
+			}
+		})
 	}
 }
 

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/md5"
-	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -442,7 +441,7 @@ func (r *revisioner) writeAsset(sourceURL string) (string, error) {
 
 	var url string
 	if r.namespace != nil {
-		url = r.namespace.CDNBaseURL + encodeAssetPath(fmt.Sprintf("%x-%s", sha256.Sum256(content), destRel))
+		url = r.namespace.CDNBaseURL + encodeAssetPath(destRel)
 	} else {
 		url = publicURL(r.cdn, filepath.Join(r.destDir, destRel))
 	}
