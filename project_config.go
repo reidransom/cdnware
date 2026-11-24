@@ -141,7 +141,9 @@ func canonicalCDNPrefix(value string) (string, error) {
 	if u.RawPath != "" && strings.Count(u.RawPath, "/") != strings.Count(path, "/") {
 		return "", invalid
 	}
-	for part := range strings.SplitSeq(path[1:len(path)-1], "/") {
+	for rest, more := path[1:len(path)-1], true; more; {
+		var part string
+		part, rest, more = strings.Cut(rest, "/")
 		if part == "" || part == "." || part == ".." {
 			return "", invalid
 		}

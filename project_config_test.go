@@ -79,10 +79,26 @@ func TestSharedProjectTargetIsolation(t *testing.T) {
 	}
 }
 
+func chdirTest(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(old); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
 func TestSharedProjectDiscoveryAndExplicitPrecedence(t *testing.T) {
 	root, path := writeSharedProject(t, sharedFixture)
 	writeTestFile(t, filepath.Join(root, "cdnware.toml"), `cdn = "https://standalone.invalid"`)
-	t.Chdir(root)
+	chdirTest(t, root)
 	settings, err := loadSettings([]string{"--target", "dev"})
 	if err != nil || settings.BaseDir != filepath.Join(root, "dev output") || settings.Namespace == nil {
 		t.Fatalf("CWD project selection = %+v: %v", settings, err)
@@ -110,7 +126,7 @@ func TestSharedProjectDiscoveryAndExplicitPrecedence(t *testing.T) {
 	if err := os.Mkdir(subdir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	t.Chdir(subdir)
+	chdirTest(t, subdir)
 	settings, err = loadSettings([]string{root})
 	if err != nil || settings.Namespace != nil || settings.Cdn != "https://standalone.invalid" {
 		t.Fatalf("no ancestor/SITEROOT project discovery = %+v: %v", settings, err)
@@ -242,7 +258,7 @@ func TestSharedProjectRejectsMalformedDataWithoutSecrets(t *testing.T) {
 
 func TestSharedProjectMissingSourcesAndStandaloneRegressions(t *testing.T) {
 	root := t.TempDir()
-	t.Chdir(root)
+	chdirTest(t, root)
 	for _, args := range [][]string{
 		{"--target", "dev"},
 		{"--target", "default"},
